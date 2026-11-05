@@ -1,7 +1,7 @@
 # Arsten Docs — Trimble Connect project extension
 
 Document register, revisions & statuses, transmittals and todos for Arsten projects, inside
-Trimble Connect (left navigation of each project). Design: [../DESIGN.md](../DESIGN.md).
+Trimble Connect (left navigation of each project). Design: [docs/DESIGN.md](docs/DESIGN.md).
 
 - **Register** — every file named like `1018-ST-DR-0101_R02_Title.pdf` becomes a document row
   (number, discipline, type, current revision, status, last change). Other files are listed under

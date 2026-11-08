@@ -109,7 +109,9 @@ export class RestConnectApi implements ConnectApi {
     const region = pickRegion(await loadRegions(), projectLocation);
     const v2 = region["connect-api"] ? trim(region["connect-api"]) + "/v2" : undefined;
     const legacy = trim(region["tc-api"]);
-    if (v2) {
+    // Verified 2026-11-08 in project 1028: Core v2 (eu.api.trimble.com) sends no CORS headers for the
+    // extension origin, while legacy 2.0 answers everything we need. Use legacy unless ?core=v2 is set.
+    if (v2 && new URLSearchParams(location.search).get("core") === "v2") {
       const api = new RestConnectApi(projectId, token, region, v2, "core-v2");
       try {
         await api.json(`${v2}/projects/${projectId}`);

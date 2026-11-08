@@ -75,12 +75,13 @@ itself changes (title, icon), remove and re-add the extension in the project.
 ## Notes / limits
 
 - Region is detected from the project location (`/tc/api/2.0/regions`), EU by default.
-  Files are read with Core v2 (`eu.api.trimble.com/connect/v2`); if that is not reachable with the
-  token the app falls back to the legacy `app21.connect.trimble.com/tc/api/2.0` (same endpoints).
+  All calls go to the legacy `app21.connect.trimble.com/tc/api/2.0` (+ Issues API). Tested in project
+  1028 on 2026-11-08: legacy project/files/ToDos/Releases/change-cursor and Issues answer 200 with the
+  extension token; Core v2 (`eu.api.trimble.com/connect/v2`) is blocked by CORS from the browser.
 - The register reads the whole project tree in one call (`/files/fs/snapshot`); fine up to tens of
   thousands of files.
 - Concurrent edits: saves use `If-Match` on `tracker.json`; on a conflict the app re-reads and
   re-applies the change automatically.
-- The extension uses the token Connect hands to extensions, so a Trimble Developer Console app
-  registration should not be needed for it (to be confirmed at first install with *Check access*).
+- The extension uses the token Connect hands to extensions; no Trimble Developer Console app
+  registration is needed for it (confirmed at first install).
   It is needed later for the cross-project dashboard / bot user.

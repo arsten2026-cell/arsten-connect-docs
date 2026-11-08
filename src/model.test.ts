@@ -53,6 +53,33 @@ describe("buildRegister", () => {
   });
 });
 
+describe("file documents (no numbering, revisions = Connect versions)", () => {
+  const files: SnapshotItem[] = [
+    { id: "R", nm: "30_REINFORCEMENT PLANS", tp: "FOLDER", pid: "root" },
+    { id: "P1", nm: "FP1.pdf", tp: "FILE", pid: "R", vid: "p1v3", rv: 3 },
+    { id: "P2", nm: "model.ifc", tp: "FILE", pid: "R", rv: 2 },
+    { id: "P3", nm: "1018-ST-DR-0101_R01.pdf", tp: "FILE", pid: "R", rv: 1 },
+  ];
+  it("tracks PDFs that don't match the pattern", () => {
+    let t = emptyTracker();
+    const r = buildRegister(files, t, new Map());
+    const f = r.docs.find((d) => d.kind === "file")!;
+    expect(f).toMatchObject({ key: "f:P1", label: "FP1", disc: "30_REINFORCEMENT PLANS", type: "PDF", status: "Draft" });
+    expect(f.current.revLabel).toBe("v3");
+    expect(r.docs[0].kind).toBe("numbered");
+    expect(r.unnumbered.map((u) => u.name)).toEqual(["model.ifc"]);
+    t = setStatus(t, "f:P1", "v3", "Issued", "Draft", { name: "N" });
+    expect(buildRegister(files, t, new Map()).docs.find((d) => d.kind === "file")!.status).toBe("Issued");
+    // a new upload (v4) starts as Draft again
+    const v4 = files.map((x) => (x.id === "P1" ? { ...x, rv: 4 } : x));
+    expect(buildRegister(v4, t, new Map()).docs.find((d) => d.kind === "file")!.status).toBe("Draft");
+  });
+  it("can be switched off", () => {
+    const t = { ...emptyTracker(), settings: { pattern: emptyTracker().settings.pattern, trackExts: "" } };
+    expect(buildRegister(files, t, new Map()).docs.every((d) => d.kind === "numbered")).toBe(true);
+  });
+});
+
 describe("transmittals", () => {
   it("numbers sequentially per project code and sets statuses", () => {
     let t = emptyTracker();

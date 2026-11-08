@@ -68,6 +68,8 @@ const dict = {
   pattern: ["Шаблон за номер (регулярен израз)", "Numbering pattern (regular expression)"],
   patternHelp: ["Групи: proj, disc, type, num, rev. Пример: 1018-ST-DR-0101_R02", "Groups: proj, disc, type, num, rev. Example: 1018-ST-DR-0101_R02"],
   testName: ["Тест на име на файл", "Test a file name"],
+  trackExts: ["Проследявай и всички файлове с разширение", "Also track all files with extension"],
+  trackExtsHelp: ["Файлове без номер по шаблона, напр. FP1.pdf – всяко качване в Connect е нова версия (v1, v2…). Празно = изключено.", "Files that don't match the pattern, e.g. FP1.pdf – every upload to Connect is a new version (v1, v2…). Empty = off."],
   projectCode: ["Код на проекта (за номер на трансмитал)", "Project code (for transmittal numbers)"],
   todoBackend: ["Къде да се пазят задачите", "Where todos are stored"],
   auto: ["Автоматично", "Automatic"],

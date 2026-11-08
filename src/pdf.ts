@@ -128,7 +128,7 @@ export async function transmittalPdf(tr: Transmittal, projectName: string): Prom
   y -= 8 * MM;
   header();
   tr.items.forEach((it, i) => {
-    const cells = [String(i + 1), it.key, it.rev, it.title ?? "", it.name];
+    const cells = [String(i + 1), it.label ?? it.key, it.rev, it.title ?? "", it.name];
     const wrapped = cells.map((c, ci) => wrap(c, ci === 1 ? fMed : fReg, 9, cols[ci].w - 6));
     const rows = Math.max(...wrapped.map((w) => w.length));
     if (y - rows * 11 < BOTTOM + 22 * MM) { newPage(); header(); }

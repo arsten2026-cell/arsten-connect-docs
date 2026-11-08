@@ -67,7 +67,10 @@ export interface ConnectApi {
   createTodo(t: NativeTodoInput): Promise<NativeTodo>;
   updateTodo(id: string, t: Partial<NativeTodoInput>): Promise<NativeTodo>;
   probe(): Promise<ProbeResult[]>;
+  versions(fileId: string): Promise<FileVersion[]>;
 }
+
+export interface FileVersion { versionId: string; revision: number; modified?: string; modifiedBy?: string; size?: number }
 
 export interface ProbeResult { name: string; url: string; ok: boolean; status: string; ms: number }
 
@@ -223,6 +226,18 @@ export class RestConnectApi implements ConnectApi {
       await sleep(Math.min(500 * (i + 1), 3000));
     }
     throw new Error("Upload did not finish in time");
+  }
+
+  async versions(fileId: string): Promise<FileVersion[]> {
+    const r: any = await this.json(`${this.legacyBase}/files/${fileId}/versions?projectId=${encodeURIComponent(this.projectId)}`);
+    const list: any[] = Array.isArray(r) ? r : r?.items ?? [];
+    return list.map((v) => ({
+      versionId: v.versionId ?? v.id,
+      revision: v.revision ?? v.rv ?? 0,
+      modified: v.modifiedOn ?? v.modified,
+      modifiedBy: v.modifiedBy ? [v.modifiedBy.firstName, v.modifiedBy.lastName].filter(Boolean).join(" ") : undefined,
+      size: v.size,
+    })).sort((a, b) => b.revision - a.revision);
   }
 
   async listTodos(): Promise<NativeTodo[]> {

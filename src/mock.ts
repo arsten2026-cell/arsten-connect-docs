@@ -34,6 +34,11 @@ export class MockConnectApi implements ConnectApi {
     file("1018-ST-EX-0001_R01_Обяснителна записка.docx", "f-st-calc", 5);
     file("1018-FS-DR-0201_R01_Евакуация.pdf", "f-fs", 20, "u3");
     file("Скица от клиента.jpg", "f-ar", 50, "u3");
+    folder("f-ex", "04_EXECUTION");
+    folder("f-rp", "LATEST DRAWINGS", "f-ex");
+    file("FP1.pdf", "f-rp", 4, "u1", 3);
+    file("FP2.pdf", "f-rp", 4, "u1", 1);
+    file("FS1.pdf", "f-rp", 2, "u1", 2);
     file("model_v5.ifc", "f-st", 3);
     this.todos = [
       { id: "t1", label: "1", title: "Проверка на армировка плоча +3.20", status: "IN_PROGRESS", dueDate: iso(-4).slice(0, 10), assignees: [{ id: "u1", name: "Найден Кочев", type: "USER" }], createdOn: iso(6) },
@@ -95,6 +100,13 @@ export class MockConnectApi implements ConnectApi {
     const x = this.todos.find((i) => i.id === id)!;
     Object.assign(x, t);
     return x;
+  }
+  async versions(fileId: string) {
+    const f = this.items.find((i) => i.id === fileId)!;
+    return Array.from({ length: f.rv ?? 1 }, (_, i) => ({
+      versionId: i + 1 === f.rv ? f.vid ?? "" : `${f.vid}-old${i + 1}`, revision: i + 1,
+      modified: new Date(Date.parse(f.mt ?? "") - ((f.rv ?? 1) - i - 1) * 5 * 86400000).toISOString(), modifiedBy: "Найден Кочев",
+    })).reverse();
   }
   async probe() {
     return [{ name: "Mock mode - no Trimble Connect connection", url: "", ok: true, status: "mock", ms: 0 }];

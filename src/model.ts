@@ -38,6 +38,7 @@ export type TransmittalPurpose = "For approval" | "For construction" | "For info
 
 export interface TransmittalItem {
   key: string;
+  label?: string; // display number when key is "f:<fileId>"
   rev: string;
   name: string;
   title?: string;
@@ -75,6 +76,9 @@ export interface LocalTodo {
 
 export interface TrackerSettings {
   pattern: string;
+  /** Files that don't match the pattern but have one of these extensions are tracked too, one document per
+   *  file, revisions = Connect versions (v1, v2…). Comma-separated, e.g. "pdf" or "pdf,dwg". Empty = off. */
+  trackExts?: string;
   projectCode?: string; // used in transmittal numbers; defaults to most common parsed proj
   todoBackend?: "native" | "local";
 }
@@ -90,7 +94,7 @@ export interface Tracker {
 }
 
 export function emptyTracker(): Tracker {
-  return { schema: 1, settings: { pattern: DEFAULT_PATTERN }, status: {}, log: [], transmittals: [], todos: [] };
+  return { schema: 1, settings: { pattern: DEFAULT_PATTERN, trackExts: "pdf" }, status: {}, log: [], transmittals: [], todos: [] };
 }
 
 /** Accepts anything read from tracker.json and fills missing parts, so old/partial files still load. */
@@ -129,7 +133,10 @@ export interface RevRow {
 }
 
 export interface DocRow {
-  key: string;
+  /** "numbered" = parsed from the naming pattern; "file" = one Connect file, revisions are its versions */
+  kind: "numbered" | "file";
+  key: string; // stable id: "1018-ST-DR-0101" or "f:<fileId>"
+  label: string; // what the user sees in the Number column
   proj: string;
   disc: string;
   type: string;
@@ -201,12 +208,19 @@ export function buildRegister(items: SnapshotItem[], tracker: Tracker, users: Ma
     : undefined;
 
   const byKey = new Map<string, { parsed: ParsedName; files: Map<number, SnapshotItem[]> }>();
+  const fileDocs: SnapshotItem[] = [];
+  const exts = new Set((tracker.settings.trackExts ?? "").split(/[\s,;]+/).map((e) => e.replace(/^\./, "").toLowerCase()).filter(Boolean));
   const unnumbered: Register["unnumbered"] = [];
   const userName = (id?: string) => (id ? users.get(id)?.name ?? id : undefined);
 
   for (const f of live) {
     if (f.tp !== "FILE" || inTrackerFolder(f.pid)) continue;
     const p = parseName(f.nm, re);
+    const ext = f.nm.includes(".") ? f.nm.slice(f.nm.lastIndexOf(".") + 1).toLowerCase() : "";
+    if (!p && exts.has(ext)) {
+      fileDocs.push(f);
+      continue;
+    }
     if (!p) {
       unnumbered.push({ fileId: f.id, name: f.nm, folderPath: folderPathOf(f.pid, folders), modified: f.mt, modifiedBy: userName(f.mid) });
       continue;
@@ -254,7 +268,9 @@ export function buildRegister(items: SnapshotItem[], tracker: Tracker, users: Ma
     });
     const current = revs[revs.length - 1];
     docs.push({
+      kind: "numbered",
       key,
+      label: key,
       proj: parsed.proj,
       disc: parsed.disc,
       type: parsed.type,
@@ -266,7 +282,27 @@ export function buildRegister(items: SnapshotItem[], tracker: Tracker, users: Ma
       transmittals: trByRev.get(key) ?? [],
     });
   }
-  docs.sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+  for (const f of fileDocs) {
+    const key = `f:${f.id}`;
+    const v = f.rv ?? 1;
+    const label = f.nm.replace(/\.[^.]+$/, "");
+    // only the current version exists in the snapshot; older versions' statuses stay in tracker.status
+    const stored = tracker.status[revId(key, `v${v}`)];
+    const folder = f.pid ? folders.get(f.pid) : undefined;
+    const rev: RevRow = {
+      rev: v, revLabel: `v${v}`, fileId: f.id, versionId: f.vid, name: f.nm, folderId: f.pid,
+      folderPath: folderPathOf(f.pid, folders), modified: f.mt, modifiedBy: userName(f.mid), size: f.sz,
+      connectVersion: v, stored, status: stored ?? "Draft", duplicates: 0,
+    };
+    docs.push({
+      kind: "file", key, label, proj: "", disc: folder?.nm ?? "/", type: (f.nm.split(".").pop() ?? "").toUpperCase(),
+      num: label, title: "", revs: [rev], current: rev, status: rev.status, transmittals: trByRev.get(key) ?? [],
+    });
+  }
+  docs.sort((a, b) =>
+    a.kind !== b.kind ? (a.kind === "numbered" ? -1 : 1)
+    : a.kind === "file" ? a.disc.localeCompare(b.disc) || a.label.localeCompare(b.label, undefined, { numeric: true })
+    : a.key.localeCompare(b.key, undefined, { numeric: true }));
   unnumbered.sort((a, b) => a.folderPath.localeCompare(b.folderPath) || a.name.localeCompare(b.name));
   return { docs, unnumbered, folders, trackerFolderId: trackerFolderAny?.id, trackerFileId: trackerFile?.id };
 }
@@ -289,7 +325,7 @@ export function statusForPurpose(p: TransmittalPurpose): DocStatus {
 
 export function mostCommonProject(docs: DocRow[]): string | undefined {
   const c = new Map<string, number>();
-  for (const d of docs) c.set(d.proj, (c.get(d.proj) ?? 0) + 1);
+  for (const d of docs) if (d.proj) c.set(d.proj, (c.get(d.proj) ?? 0) + 1);
   return [...c.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
 }
 

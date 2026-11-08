@@ -128,7 +128,7 @@ class App {
     await this.run(t("saving"), async () => {
       await this.store.save((tr) => setStatus(tr, key, rev, to, from, this.actor(), note));
       this.rebuild();
-      this.toast(`${key} ${rev} → ${t("st_" + to)}`);
+      this.toast(`${this.labelOf(key)} ${rev} → ${t("st_" + to)}`);
     });
   }
 
@@ -177,10 +177,10 @@ class App {
     let docs = this.reg.docs.filter((d) =>
       (!this.disc || d.disc === this.disc) &&
       (!this.status || d.status === this.status) &&
-      (!q || `${d.key} ${d.title} ${d.current.name} ${d.current.folderPath}`.toLowerCase().includes(q)));
+      (!q || `${d.label} ${d.title} ${d.current.name} ${d.current.folderPath}`.toLowerCase().includes(q)));
     const dir = this.sortDir;
     const cmp: Record<string, (a: DocRow, b: DocRow) => number> = {
-      key: (a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }),
+      key: (a, b) => (a.kind === b.kind ? 0 : a.kind === "numbered" ? -1 : 1) || a.disc.localeCompare(b.disc) || a.label.localeCompare(b.label, undefined, { numeric: true }),
       title: (a, b) => a.title.localeCompare(b.title),
       status: (a, b) => STATUSES.indexOf(a.status) - STATUSES.indexOf(b.status),
       modified: (a, b) => (a.current.modified ?? "").localeCompare(b.current.modified ?? ""),
@@ -258,16 +258,19 @@ class App {
       const rows: HTMLElement[] = [];
       let lastDisc = "";
       for (const d of list) {
-        if (this.sortCol === "key" && d.disc !== lastDisc) {
-          lastDisc = d.disc;
-          const n = list.filter((x) => x.disc === d.disc).length;
-          rows.push(h("tr", { class: "group" }, h("td", { colspan: 8 }, h("b", null, d.disc), ` · ${DISCIPLINES[d.disc]?.[getLang()] ?? ""} · ${n}`)));
+        const grp = d.kind === "file" ? `f:${d.current.folderPath}` : d.disc;
+        if (this.sortCol === "key" && grp !== lastDisc) {
+          lastDisc = grp;
+          const n = list.filter((x) => (x.kind === "file" ? `f:${x.current.folderPath}` : x.disc) === grp).length;
+          rows.push(h("tr", { class: "group" }, h("td", { colspan: 8 }, d.kind === "file"
+            ? [h("b", null, d.disc), ` · ${d.current.folderPath} · ${n}`]
+            : [h("b", null, d.disc), ` · ${DISCIPLINES[d.disc]?.[getLang()] ?? ""} · ${n}`])));
         }
         const cb = h("input", { type: "checkbox", checked: this.sel.has(d.key), onclick: (e: Event) => e.stopPropagation(),
           onchange: (e: Event) => { (e.target as HTMLInputElement).checked ? this.sel.add(d.key) : this.sel.delete(d.key); (cb.closest("tr") as HTMLElement).classList.toggle("sel"); updateSel(); } });
         rows.push(h("tr", { class: "row" + (this.sel.has(d.key) ? " sel" : ""), onclick: () => this.openDoc(d.key) },
           h("td", { class: "cb" }, cb),
-          h("td", { class: "key" }, d.key),
+          h("td", { class: "key" }, d.label),
           h("td", { class: "num" }, d.current.revLabel, d.revs.length > 1 ? h("span", { class: "muted" }, ` /${d.revs.length}`) : "",
             d.current.duplicates ? h("span", { class: "warnmark", title: "duplicate file names" }, " ⚠") : ""),
           h("td", { class: "title" }, d.title || h("span", { class: "muted" }, d.current.name)),
@@ -312,6 +315,30 @@ class App {
 
   openKey = "";
 
+  labelOf(key: string) { return this.reg.docs.find((d) => d.key === key)?.label ?? key; }
+
+  /** File documents: revisions are Connect versions, loaded on demand. */
+  versionTable(d: DocRow) {
+    const box = h("div", { class: "muted" }, t("loading"));
+    this.host.api.versions(d.current.fileId).then((vs) => {
+      const st = this.store.tracker.status;
+      clear(box, h("table", null, h("tbody", null, vs.map((v) => {
+        const lbl = `v${v.revision}`;
+        const cur = v.revision === d.current.rev;
+        // an older version is replaced by the newer upload, whatever it was marked
+        const stored = st[`${d.key}@${lbl}`] as DocStatus | undefined;
+        const status: DocStatus = cur ? d.status : stored === "Issued" || !stored ? "Superseded" : stored;
+        return h("tr", null,
+          h("td", { class: "num" }, lbl),
+          h("td", null, cur ? this.statusSelect(d.key, lbl, d.status) : h("span", { class: `st s-${slug(status)}` }, t("st_" + status))),
+          h("td", { class: "date" }, fmtDate(v.modified), v.modifiedBy ? ` · ${v.modifiedBy}` : ""),
+          h("td", null, h("button", { class: "link", onclick: () => this.openFile(d.current.fileId, v.versionId) }, t("download"))));
+      }))));
+      box.className = "";
+    }).catch((e) => { box.textContent = `${t("error")}: ${e?.message ?? e}`; });
+    return box;
+  }
+
   openDoc(key: string) {
     document.querySelectorAll(".drawer, .drawer-bg").forEach((e) => e.remove());
     const d = this.reg.docs.find((x) => x.key === key);
@@ -324,11 +351,11 @@ class App {
     const bg = h("div", { class: "drawer-bg", onclick: close });
     const dr = h("div", { class: "drawer" },
       h("button", { class: "close", onclick: close }, t("close")),
-      h("div", { class: "mono muted" }, `${d.disc} · ${DISCIPLINES[d.disc]?.[getLang()] ?? ""} · ${DOC_TYPES[d.type]?.[getLang()] ?? d.type}`),
-      h("h2", null, d.key),
+      h("div", { class: "mono muted" }, d.kind === "file" ? `${d.current.folderPath} · ${d.type}` : `${d.disc} · ${DISCIPLINES[d.disc]?.[getLang()] ?? ""} · ${DOC_TYPES[d.type]?.[getLang()] ?? d.type}`),
+      h("h2", null, d.label),
       h("div", { class: "soft" }, d.title),
       h("h3", null, t("revisions")),
-      h("table", null, h("tbody", null, [...d.revs].reverse().map((r) => h("tr", null,
+      d.kind === "file" ? this.versionTable(d) : h("table", null, h("tbody", null, [...d.revs].reverse().map((r) => h("tr", null,
         h("td", { class: "num" }, r.revLabel),
         h("td", null, this.statusSelect(d.key, r.revLabel, r.status)),
         h("td", { class: "date" }, fmtDate(r.modified), r.modifiedBy ? ` · ${r.modifiedBy}` : "", r.connectVersion && r.connectVersion > 1 ? h("span", { class: "muted" }, ` · v${r.connectVersion}`) : ""),
@@ -359,14 +386,14 @@ class App {
     const esc = (s: unknown) => `"${String(s ?? "").replace(/"/g, '""')}"`;
     const head = ["Number", "Discipline", "Type", "Revision", "Title", "Status", "Modified", "Modified by", "Folder", "File", "Transmittals"];
     const lines = [head.join(";")].concat(this.filteredDocs().map((d) => [
-      d.key, d.disc, d.type, d.current.revLabel, d.title, d.status, d.current.modified?.slice(0, 10), d.current.modifiedBy,
+      d.label, d.disc, d.type, d.current.revLabel, d.title, d.status, d.current.modified?.slice(0, 10), d.current.modifiedBy,
       d.current.folderPath, d.current.name, d.transmittals.join(" "),
     ].map(esc).join(";")));
     downloadBlob(new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" }), `register_${this.projectCode()}_${today()}.csv`);
   }
 
   projectCode() {
-    return this.store.tracker.settings.projectCode || mostCommonProject(this.reg.docs) || "PRJ";
+    return this.store.tracker.settings.projectCode || mostCommonProject(this.reg.docs) || /^\d{3,5}/.exec(this.host.projectName)?.[0] || "PRJ";
   }
 
   // ---------------- Transmittals
@@ -389,7 +416,7 @@ class App {
         h("td", null, x.to, x.attn ? h("div", { class: "muted" }, x.attn) : ""),
         h("td", null, h("span", { class: `st s-${slug(statusForPurpose(x.purpose))}` }, t("pu_" + x.purpose))),
         h("td", null, h("details", null, h("summary", null, `${x.items.length}`),
-          x.items.map((i) => h("div", { class: "mono", style: "font-size:12px" }, `${i.key} ${i.rev}`)))),
+          x.items.map((i) => h("div", { class: "mono", style: "font-size:12px" }, `${i.label ?? i.key} ${i.rev}`)))),
         h("td", { class: "soft hide-sm" }, x.by),
         h("td", null, x.pdfFileId ? h("button", { class: "link", onclick: () => this.openFile(x.pdfFileId!) }, t("pdf")) :
           h("button", { class: "link", onclick: () => this.regeneratePdf(x) }, "PDF ↻"))))))));
@@ -402,10 +429,10 @@ class App {
     const countEl = h("span", { class: "muted" });
     const drawPicker = () => {
       const q = dft.filter.toLowerCase();
-      const docs = this.reg.docs.filter((d) => d.status !== "Superseded" && (!q || `${d.key} ${d.title}`.toLowerCase().includes(q)));
+      const docs = this.reg.docs.filter((d) => d.status !== "Superseded" && (!q || `${d.label} ${d.title} ${d.current.folderPath}`.toLowerCase().includes(q)));
       clear(pickBox, h("table", null, h("tbody", null, docs.map((d) => h("tr", { class: "row" + (dft.keys.has(d.key) ? " sel" : ""), onclick: () => { dft.keys.has(d.key) ? dft.keys.delete(d.key) : dft.keys.add(d.key); drawPicker(); } },
         h("td", { class: "cb" }, h("input", { type: "checkbox", checked: dft.keys.has(d.key) })),
-        h("td", { class: "key" }, d.key), h("td", { class: "num" }, d.current.revLabel), h("td", null, d.title),
+        h("td", { class: "key" }, d.label), h("td", { class: "num" }, d.current.revLabel), h("td", null, d.title || h("span", { class: "muted" }, d.current.folderPath)),
         h("td", null, h("span", { class: `st s-${slug(d.status)}` }, t("st_" + d.status))))))));
       countEl.textContent = `${dft.keys.size} ${t("selected")}`;
     };
@@ -443,7 +470,7 @@ class App {
           id: nextTransmittalId(tr, this.projectCode()),
           date: dft.date, to: dft.to.trim(), attn: dft.attn.trim() || undefined, purpose: dft.purpose, note: dft.note.trim() || undefined,
           by: this.host.user.name, byId: this.host.user.id, createdAt: now,
-          items: docs.map((d) => ({ key: d.key, rev: d.current.revLabel, name: d.current.name, title: d.title, fileId: d.current.fileId, versionId: d.current.versionId })),
+          items: docs.map((d) => ({ key: d.key, ...(d.kind === "file" ? { label: d.label } : {}), rev: d.current.revLabel, name: d.current.name, title: d.title, fileId: d.current.fileId, versionId: d.current.versionId })),
         };
         return addTransmittal(tr, created, (k, r) => this.statusOf(k, r), this.actor());
       });
@@ -498,7 +525,7 @@ class App {
       h("thead", null, h("tr", null, h("th", null, t("title")), h("th", null, t("document")), h("th", null, t("assignee")), h("th", null, t("due")), h("th", null, t("status")))),
       h("tbody", null, list.map((x) => h("tr", null,
         h("td", null, x.label ? h("span", { class: "muted mono" }, `#${x.label} `) : "", x.title, x.description ? h("div", { class: "muted", style: "font-size:12px" }, x.description) : ""),
-        h("td", { class: "key" }, x.docKey ? h("button", { class: "link", onclick: () => { this.tab = "register"; this.render(); this.openDoc(x.docKey!); } }, x.docKey) : ""),
+        h("td", { class: "key" }, x.docKey ? h("button", { class: "link", onclick: () => { this.tab = "register"; this.render(); this.openDoc(x.docKey!); } }, this.labelOf(x.docKey)) : ""),
         h("td", null, x.assignee?.name ?? ""),
         h("td", { class: isOverdue(x.due, x.state === "Done") ? "date overdue" : "date" }, x.due ? fmtDate(x.due) : ""),
         h("td", null, h("select", { class: "stsel", onchange: (e: Event) => this.setTodoState(x, (e.target as HTMLSelectElement).value as TodoState) },
@@ -516,7 +543,7 @@ class App {
         h("label", null, t("assignee")), h("select", { onchange: set("assignee") }, h("option", { value: "" }, "—"), this.users.map((u) => h("option", { value: u.id }, u.name))),
         h("label", null, t("due")), h("input", { type: "date", oninput: set("due") }),
         h("label", null, t("document")), h("select", { onchange: set("doc") }, h("option", { value: "" }, "—"),
-          this.reg.docs.map((d) => h("option", { value: d.key, selected: d.key === v.doc }, `${d.key} ${d.title}`))),
+          this.reg.docs.map((d) => h("option", { value: d.key, selected: d.key === v.doc }, `${d.label} ${d.title}`))),
         h("label", null, t("description")), h("textarea", { rows: 2, oninput: set("description") })),
       h("div", { class: "actions" },
         h("button", { class: "primary", onclick: async () => {
@@ -537,7 +564,7 @@ class App {
   // ---------------- Settings
   viewSettings(body: HTMLElement) {
     const st = this.store.tracker.settings;
-    const v = { pattern: st.pattern || DEFAULT_PATTERN, projectCode: st.projectCode ?? "", todoBackend: st.todoBackend ?? "" };
+    const v = { pattern: st.pattern || DEFAULT_PATTERN, trackExts: st.trackExts ?? "", projectCode: st.projectCode ?? "", todoBackend: st.todoBackend ?? "" };
     const testOut = h("div", { class: "mono soft", style: "font-size:12px" });
     let testName = "1018-ST-DR-0101_R02_Фундаменти.pdf";
     const runTest = () => {
@@ -554,6 +581,8 @@ class App {
         h("label", null, t("pattern")), h("div", null, h("input", { value: v.pattern, style: "width:100%", class: "mono", oninput: (e: Event) => { v.pattern = (e.target as HTMLInputElement).value; runTest(); } }),
           h("div", { class: "muted", style: "font-size:12px" }, t("patternHelp"))),
         h("label", null, t("testName")), h("div", null, h("input", { value: testName, style: "width:100%", oninput: (e: Event) => { testName = (e.target as HTMLInputElement).value; runTest(); } }), testOut),
+        h("label", null, t("trackExts")), h("div", null, h("input", { value: v.trackExts, placeholder: "pdf", oninput: (e: Event) => { v.trackExts = (e.target as HTMLInputElement).value.trim(); } }),
+          h("div", { class: "muted", style: "font-size:12px" }, t("trackExtsHelp"))),
         h("label", null, t("projectCode")), h("input", { value: v.projectCode, placeholder: mostCommonProject(this.reg.docs) ?? "", oninput: (e: Event) => { v.projectCode = (e.target as HTMLInputElement).value.trim(); } }),
         h("label", null, t("todoBackend")), h("select", { onchange: (e: Event) => { v.todoBackend = (e.target as HTMLSelectElement).value; } },
           h("option", { value: "", selected: !v.todoBackend }, t("auto")),
@@ -565,7 +594,7 @@ class App {
       h("div", { class: "actions" }, h("button", { class: "primary", onclick: async () => {
         try { compilePattern(v.pattern); } catch { alert("Invalid pattern"); return; }
         await this.run(t("saving"), async () => {
-          await this.store.save((tr) => ({ ...tr, settings: { ...tr.settings, pattern: v.pattern, projectCode: v.projectCode || undefined, todoBackend: (v.todoBackend || undefined) as any } }));
+          await this.store.save((tr) => ({ ...tr, settings: { ...tr.settings, pattern: v.pattern, trackExts: v.trackExts, projectCode: v.projectCode || undefined, todoBackend: (v.todoBackend || undefined) as any } }));
           this.rebuild();
           await this.todos.detect();
           await this.loadTodos();

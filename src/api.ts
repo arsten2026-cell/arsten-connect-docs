@@ -285,11 +285,24 @@ export class RestConnectApi implements ConnectApi {
     return Array.isArray(r) ? r : r?.items ?? [];
   }
 
+  /** Connect is picky about the due-date format ("invalid date format" for toISOString()); try the known forms, and as a
+   *  last resort create the ToDo without a due date (the date is then only in the description). */
   async createTodo(t: NativeTodoInput): Promise<NativeTodo> {
-    return this.json(`${this.legacyBase}/todos`, {
-      method: "POST",
-      body: JSON.stringify({ type: "Request", priority: "NORMAL", status: "NEW", ...t, projectId: this.projectId }),
-    });
+    const day = t.dueDate ? t.dueDate.slice(0, 10) : "";
+    const forms = day ? [`${day}T12:00:00.000+0000`, `${day}T12:00:00+0000`, `${day}T12:00:00Z`, `${day}`, ""] : [""];
+    let last: unknown;
+    for (const due of forms) {
+      const body: any = { type: "Request", priority: "NORMAL", status: "NEW", ...t, projectId: this.projectId };
+      if (due) body.dueDate = due; else { delete body.dueDate; if (day) body.description = `${body.description ?? ""}
+Срок: ${day.split("-").reverse().join(".")}`.trim(); }
+      try {
+        return await this.json(`${this.legacyBase}/todos`, { method: "POST", body: JSON.stringify(body) });
+      } catch (e) {
+        last = e;
+        if (!(e instanceof ApiError && e.status === 400 && /date/i.test(e.body))) throw e;
+      }
+    }
+    throw last;
   }
 
   async updateTodo(id: string, t: Partial<NativeTodoInput>): Promise<NativeTodo> {

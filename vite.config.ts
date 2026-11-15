@@ -11,9 +11,9 @@ function manifest(): Plugin {
   const build = (site: string) =>
     JSON.stringify(
       {
-        title: "Arsten Docs",
+        title: "Документи · Arsten / MULTIPLAN",
         description:
-          "Document register, revisions, statuses, transmittals and todos for Arsten projects / Регистър на документи, ревизии, трансмитали и задачи",
+          "Контрол на документацията за изпълнителя: регистър, издаване за изпълнение с печат и QR, потвърждения, трансмитали, въпроси (RFI), работни чертежи. Document control for the general contractor.",
         icon: `${site}/icon.png`,
         url: `${site}/index.html`,
         extensionType: ["project"],

@@ -68,7 +68,14 @@ export interface ConnectApi {
   updateTodo(id: string, t: Partial<NativeTodoInput>): Promise<NativeTodo>;
   probe(): Promise<ProbeResult[]>;
   versions(fileId: string): Promise<FileVersion[]>;
+  groups(): Promise<GroupRef[]>;
+  groupMembers(groupId: string): Promise<string[]>;
+  readBytes(fileId: string, versionId?: string): Promise<ArrayBuffer>;
+  moveFile(fileId: string, parentId: string): Promise<void>;
+  getTodo(id: string): Promise<NativeTodo | undefined>;
 }
+
+export interface GroupRef { id: string; name: string }
 
 export interface FileVersion { versionId: string; revision: number; modified?: string; modifiedBy?: string; size?: number }
 
@@ -86,6 +93,8 @@ export interface NativeTodo {
   assignees?: { id: string; name?: string; firstName?: string; lastName?: string; type: string }[];
   createdBy?: { firstName?: string; lastName?: string };
   createdOn?: string;
+  modifiedBy?: { firstName?: string; lastName?: string };
+  modifiedOn?: string;
 }
 export interface NativeTodoInput {
   title: string;
@@ -180,6 +189,7 @@ export class RestConnectApi implements ConnectApi {
       id: u.id,
       name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.email || u.id,
       email: u.email,
+      role: u.role,
     }));
   }
 
@@ -238,6 +248,33 @@ export class RestConnectApi implements ConnectApi {
       modifiedBy: v.modifiedBy ? [v.modifiedBy.firstName, v.modifiedBy.lastName].filter(Boolean).join(" ") : undefined,
       size: v.size,
     })).sort((a, b) => b.revision - a.revision);
+  }
+
+  async groups(): Promise<GroupRef[]> {
+    const r: any = await this.json(`${this.legacyBase}/groups?projectId=${encodeURIComponent(this.projectId)}`, { headers: { Range: "items=0-999" } });
+    const list: any[] = Array.isArray(r) ? r : r?.items ?? [];
+    return list.map((g) => ({ id: g.id, name: g.name }));
+  }
+
+  async groupMembers(groupId: string): Promise<string[]> {
+    const r: any = await this.json(`${this.legacyBase}/groups/${encodeURIComponent(groupId)}/users`, { headers: { Range: "items=0-999" } });
+    const list: any[] = Array.isArray(r) ? r : r?.items ?? [];
+    return list.map((u) => u.id);
+  }
+
+  async readBytes(fileId: string, versionId?: string): Promise<ArrayBuffer> {
+    const url = await this.downloadUrl(fileId, versionId);
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new ApiError(res.status, "download", await res.text().catch(() => ""));
+    return res.arrayBuffer();
+  }
+
+  async moveFile(fileId: string, parentId: string): Promise<void> {
+    await this.json(`${this.legacyBase}/files/${encodeURIComponent(fileId)}`, { method: "PATCH", body: JSON.stringify({ parentId }) });
+  }
+
+  async getTodo(id: string): Promise<NativeTodo | undefined> {
+    try { return await this.json(`${this.legacyBase}/todos/${encodeURIComponent(id)}`); } catch (e) { if (e instanceof ApiError && e.status === 404) return undefined; throw e; }
   }
 
   async listTodos(): Promise<NativeTodo[]> {

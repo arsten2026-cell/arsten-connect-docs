@@ -13,8 +13,9 @@ const COMPANY = {
 };
 
 const PURPOSE_BG: Record<string, string> = {
+  "For review": "За преглед",
   "For approval": "За съгласуване",
-  "For construction": "За строителство",
+  "For construction": "За изпълнение",
   "For information": "За информация",
   "For tender": "За търг",
 };

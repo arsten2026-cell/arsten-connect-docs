@@ -1,46 +1,70 @@
 import "./style.css";
 import { connectHost, type Host } from "./host";
 import { TrackerStore } from "./store";
-import { TodoService, type TodoView } from "./todos";
 import {
-  addTransmittal, buildRegister, emptyTracker, isOverdue, mostCommonProject, nextTransmittalId, setStatus,
-  statusForPurpose, STATUSES, type DocRow, type DocStatus, type Register, type SnapshotItem, type Transmittal,
-  type TransmittalPurpose, type UserRef, type TodoState,
+  addAck, buildRegister, canIssue, emptyTracker, isOverdue, mostCommonProject, nextTransmittalId, revId, setMeta, setStatus, addTransmittal,
+  statusForPurpose, addDays, nextPackageId, ALL_STATUSES, KINDS, STATUS_BY_KIND, DEFAULT_SITE_FOLDER, DEFAULT_STATUS as DEFAULT_FOR,
+  type DocRow, type DocStatus, type Kind, type Register, type SnapshotItem, type Transmittal, type TransmittalPurpose, type UserRef, type Rfi, type DocMeta,
 } from "./model";
-import { compilePattern, DEFAULT_PATTERN, DISCIPLINES, DOC_TYPES, parseName } from "./naming";
+import { compilePattern, DEFAULT_PATTERN, DISCIPLINES, parseName } from "./naming";
 import { getLang, initLang, setLang, t } from "./i18n";
 import { clear, downloadBlob, fmtDate, h, today } from "./dom";
+import type { GroupRef } from "./api";
+import { loadAccess, can, type Access } from "./roles";
+import {
+  issueForConstruction, createRfi, answerRfi, closeRfi, decideSubmittal, withdrawFromSite, ackTodoStates, folderUrl, sitePath,
+  type OpsContext, type IssueResult,
+} from "./ops";
 
-const slug = (s: string) => s.replace(/s+/g, "-");
-type Tab = "register" | "transmittals" | "todos" | "settings";
-const PURPOSES: TransmittalPurpose[] = ["For approval", "For construction", "For information", "For tender"];
-const TODO_STATES: TodoState[] = ["Open", "In progress", "Done"];
+type Tab = "site" | "register" | "transmittals" | "rfis" | "settings";
+const TABS: Tab[] = ["site", "register", "transmittals", "rfis", "settings"];
+const OTHER_PURPOSES: TransmittalPurpose[] = ["For information", "For review", "For approval", "For tender"];
+const slug = (s: string) => s.replace(/\s+/g, "-");
+const stLabel = (s: DocStatus) => t("st_" + s);
+const localDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+/** dd.mm.yyyy; full timestamps in local time (UTC would show "yesterday" after midnight in Bulgaria). */
+const bgDate = (iso?: string) => (iso ? (iso.length > 10 ? localDay(new Date(iso)) : iso.slice(0, 10)).split("-").reverse().join(".") : "");
+
+async function asset(path: string) {
+  const r = await fetch(new URL(path, document.baseURI).href);
+  if (!r.ok) throw new Error(`Cannot load ${path}`);
+  return r.arrayBuffer();
+}
+
+type Assignee = { type: "USER" | "GROUP"; id: string; name: string };
 
 class App {
   root = document.getElementById("app")!;
   host!: Host;
   store!: TrackerStore;
-  todos!: TodoService;
+  ctx!: OpsContext;
+  access: Access = { role: "none", groups: [] };
   items: SnapshotItem[] = [];
   users: UserRef[] = [];
-  reg: Register = { docs: [], unnumbered: [], folders: new Map() };
-  todoList: TodoView[] = [];
-  todoError = "";
-  tab: Tab = "register";
+  groups: GroupRef[] = [];
+  reg: Register = { docs: [], unnumbered: [], folders: new Map(), siteFolderIds: new Set() };
+  todoStates = new Map<string, { closed: boolean; by?: string; at?: string }>();
+  tab: Tab = "site";
   busy = "";
   error = "";
-  // register view state
+  info = "";
+  // register view
+  kind: Kind = "design";
   q = "";
-  disc = "";
-  status = "";
+  status: DocStatus | "" = "";
+  part = "";
   sel = new Set<string>();
-  sortCol: "key" | "status" | "modified" | "title" = "key";
-  sortDir = 1;
-  // transmittal draft
-  draft: { to: string; attn: string; purpose: TransmittalPurpose; date: string; note: string; keys: Set<string>; filter: string } | null = null;
-  todoFilter: "open" | "mine" | "overdue" | "all" = "open";
-  showTodoForm = false;
+  openKey = "";
+  // dialogs
+  issue: { keys: string[]; to: string; attn: string; note: string; date: string; result?: IssueResult } | null = null;
+  trForm: { to: string; attn: string; purpose: TransmittalPurpose; date: string; note: string; keys: Set<string>; filter: string } | null = null;
+  rfiForm: { title: string; question: string; docs: Set<string>; location: string; due: string; assignee: string; filter: string } | null = null;
+  upload: { folderId: string; newFolder: string; files: File[]; from: string; kind: Kind; done?: string[] } | null = null;
+  rfiOpen = "";
+  rfiFilter: "open" | "all" = "open";
+  siteQ = "";
 
+  // ------------------------------------------------------------------ start / data
   async start() {
     try {
       this.host = await connectHost();
@@ -49,34 +73,42 @@ class App {
       return;
     }
     initLang(this.host.language);
+    document.body.classList.toggle("in-shell", this.host.inShell);
     this.store = new TrackerStore(this.host.api);
-    this.todos = new TodoService(this.host.api, this.store, () => this.host.user.name);
-    this.host.onCommand((c) => { if (["register", "transmittals", "todos", "settings"].includes(c)) this.go(c as Tab); });
+    this.ctx = {
+      api: this.host.api, store: this.store, projectId: this.host.projectId, projectName: this.host.projectName, region: this.host.location,
+      actor: () => this.actor(), projectCode: () => this.projectCode(), loadFont: (n) => asset(`fonts/${n}.ttf`),
+      progress: (m) => { this.busy = m; this.renderBusy(); },
+    };
+    this.host.onCommand((c) => { if ((TABS as string[]).includes(c)) this.go(c as Tab); });
     this.setMenu();
     await this.refresh(true);
   }
 
   setMenu() {
-    this.host.setMenu([
-      { title: t("register"), command: "register" },
-      { title: t("transmittals"), command: "transmittals" },
-      { title: t("todos"), command: "todos" },
-      { title: t("settings"), command: "settings" },
-    ]);
+    this.host.setMenu(TABS.map((k) => ({ title: t(k), command: k })));
   }
 
-  go(tab: Tab) { this.tab = tab; this.render(); }
+  actor() { return { name: this.host.user.name, id: this.host.user.id }; }
+  get canEdit() { return can.edit(this.access.role); }
+
+  projectCode() {
+    return this.store.tracker.settings.projectCode || mostCommonProject(this.reg.docs) || /^\d{3,5}/.exec(this.host.projectName)?.[0] || "PRJ";
+  }
+
+  go(tab: Tab) { this.tab = tab; this.openKey = ""; this.render(); }
 
   toast(msg: string) {
     const el = h("div", { class: "toast" }, msg);
     document.body.appendChild(el);
-    setTimeout(() => el.remove(), 2600);
+    setTimeout(() => el.remove(), 3000);
   }
 
   async run<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
+    if (this.busy) return undefined;
     this.busy = label;
     this.error = "";
-    this.renderHeaderState();
+    this.renderBusy();
     try {
       return await fn();
     } catch (e: any) {
@@ -91,45 +123,70 @@ class App {
 
   async refresh(first = false) {
     await this.run(t("loading"), async () => {
-      const [items, users] = await Promise.all([this.host.api.snapshot(), this.host.api.users().catch(() => [] as UserRef[])]);
+      const api = this.host.api;
+      const [items, users] = await Promise.all([api.snapshot(), api.users().catch(() => [] as UserRef[])]);
       this.items = items;
       this.users = users;
+      if (first) {
+        const me = users.find((u) => u.id === this.host.user.id || (u.email && u.email === this.host.user.email));
+        this.access = await loadAccess(api, me?.id ?? this.host.user.id, String(me?.role ?? "").toUpperCase() === "ADMIN");
+        this.groups = await api.groups().catch(() => []);
+      }
       const pre = buildRegister(items, emptyTracker(), new Map());
       await this.store.load(pre.trackerFolderId, pre.trackerFileId);
       this.rebuild();
-      if (first) await this.todos.detect();
-      await this.loadTodos();
+      this.todoStates = await ackTodoStates(api, this.store.tracker.transmittals);
     });
-  }
-
-  async loadTodos() {
-    try {
-      this.todoList = await this.todos.list();
-      this.todoError = "";
-    } catch (e: any) {
-      this.todoError = e?.message ?? String(e);
-    }
   }
 
   rebuild() {
     this.reg = buildRegister(this.items, this.store.tracker, new Map(this.users.map((u) => [u.id, u])));
   }
 
-  actor() { return { name: this.host.user.name, id: this.host.user.id }; }
-
-  statusOf(key: string, rev: string): DocStatus {
-    const d = this.reg.docs.find((x) => x.key === key);
-    return d?.revs.find((r) => r.revLabel === rev)?.status ?? "Draft";
+  /** Re-read files after operations that create files (site copies, PDFs). */
+  async reloadFiles() {
+    this.items = await this.host.api.snapshot();
+    this.rebuild();
   }
 
-  async changeStatus(key: string, rev: string, to: DocStatus, note?: string) {
-    const from = this.statusOf(key, rev);
-    if (from === to) return;
-    await this.run(t("saving"), async () => {
-      await this.store.save((tr) => setStatus(tr, key, rev, to, from, this.actor(), note));
-      this.rebuild();
-      this.toast(`${this.labelOf(key)} ${rev} → ${t("st_" + to)}`);
-    });
+  doc(key: string) { return this.reg.docs.find((d) => d.key === key); }
+  labelOf = (key: string) => this.doc(key)?.label ?? key;
+
+  statusOf = (key: string, rev: string): DocStatus => {
+    const d = this.doc(key);
+    return d?.revs.find((r) => r.revLabel === rev)?.status ?? d?.status ?? "received";
+  };
+
+  issuedAt(key: string, rev: string) {
+    const l = [...this.store.tracker.log].reverse().find((x) => x.key === key && x.rev === rev && x.to === "construction");
+    return l?.at;
+  }
+
+  acksOf(key: string, rev: string) { return this.store.tracker.acks[revId(key, rev)] ?? []; }
+  ackedByMe(key: string, rev: string) {
+    const me = this.host.user;
+    return this.acksOf(key, rev).some((a) => (me.id && a.byId === me.id) || a.by === me.name);
+  }
+
+  siteDocs() { return this.reg.docs.filter((d) => d.status === "construction"); }
+  siteRootId(): string | undefined {
+    const want = sitePath(this.store.tracker.settings.siteFolder).join(" / ");
+    for (const id of this.reg.siteFolderIds) {
+      const f = this.reg.folders.get(id);
+      if (!f) continue;
+      const parts: string[] = [];
+      let cur: SnapshotItem | undefined = f;
+      while (cur) { parts.unshift(cur.nm); cur = cur.pid ? this.reg.folders.get(cur.pid) : undefined; }
+      if (parts.join(" / ") === want) return id;
+    }
+    return undefined;
+  }
+
+  assignees(): Assignee[] {
+    return [
+      ...this.groups.map((g) => ({ type: "GROUP" as const, id: g.id, name: g.name })),
+      ...this.users.map((u) => ({ type: "USER" as const, id: u.id, name: u.name })),
+    ];
   }
 
   // ------------------------------------------------------------------ rendering
@@ -137,168 +194,542 @@ class App {
     const shell = h("div", { class: "shell" });
     shell.append(this.header());
     if (!this.host.inConnect) shell.append(h("div", { class: "banner" }, t("mockBanner")));
+    if (this.access.role === "none" && this.host.inConnect && !this.busy) {
+      shell.append(h("div", { class: "banner error" }, t("noAccess"), this.access.error ? ` (${this.access.error})` : ""));
+      clear(this.root, shell);
+      return;
+    }
+    if (!this.canEdit && this.access.role !== "none" && this.host.inConnect) shell.append(h("div", { class: "banner" }, t("readOnly")));
     if (this.error) shell.append(h("div", { class: "banner error" }, this.error));
+    if (this.info) shell.append(h("div", { class: "banner ok" }, this.info, " ", h("button", { class: "link", onclick: () => { this.info = ""; this.render(); } }, "×")));
     const body = h("div", { id: "body" });
     shell.append(body);
-    if (this.tab === "register") this.viewRegister(body);
+    if (this.tab === "site") this.viewSite(body);
+    else if (this.tab === "register") this.viewRegister(body);
     else if (this.tab === "transmittals") this.viewTransmittals(body);
-    else if (this.tab === "todos") this.viewTodos(body);
+    else if (this.tab === "rfis") this.viewRfis(body);
     else this.viewSettings(body);
-    shell.append(h("footer", { class: "foot mono" }, "arsten docs · plovdiv, bg", h("span", { class: "muted" }, ` · ${this.host.api.mode}`)));
+    shell.append(h("footer", { class: "foot mono" }, "arsten / multiplan · документи", h("span", { class: "muted" }, ` · ${this.host.api.mode} · ${t("role_" + this.access.role)}`)));
     clear(this.root, shell);
-    // keep an open history drawer in sync with the new data
-    if (this.openKey && this.tab === "register") this.openDoc(this.openKey);
-    else if (this.openKey) { this.openKey = ""; document.querySelectorAll(".drawer, .drawer-bg").forEach((e) => e.remove()); }
+    if (this.openKey) this.openDoc(this.openKey);
+    else document.querySelectorAll(".drawer, .drawer-bg").forEach((e) => e.remove());
   }
 
-  renderHeaderState() {
+  renderBusy() {
     const s = this.root.querySelector("#busy");
     if (s) s.textContent = this.busy;
   }
 
   header() {
-    const tab = (k: Tab) => h("button", { class: this.tab === k ? "active" : "", onclick: () => this.go(k) }, t(k));
+    const openRfis = this.store.tracker.rfis.filter((r) => r.state === "open").length;
+    const inbox = this.reg.docs.filter((d) => d.status === "received" || d.status === "submitted").length;
+    const badge = (n: number) => (n ? h("span", { class: "badge" }, n) : "");
+    const tab = (k: Tab, extra: any = "") => h("button", { class: this.tab === k ? "active" : "", onclick: () => this.go(k) }, t(k), extra);
     return h("div", null,
       h("header", { class: "top" },
-        h("img", { src: "arsten-logo.png", alt: "arsten" }),
+        h("img", { src: "arsten-logo.png", alt: "arsten", class: "logo" }),
         h("div", { class: "proj" },
-          h("div", { class: "mono" }, "trimble connect · docs"),
+          h("div", { class: "mono" }, "arsten / multiplan · документи"),
           h("h1", null, this.host.projectName)),
         h("div", { class: "tools" },
           h("span", { id: "busy", class: "mono muted" }, this.busy),
-          h("button", { onclick: () => this.refresh(), title: t("refresh") }, "↻ " + t("refresh")),
+          h("button", { onclick: () => this.refresh(), title: t("refresh") }, "↻"),
           h("button", { onclick: () => { setLang(getLang() === "bg" ? "en" : "bg"); this.setMenu(); this.render(); } }, getLang() === "bg" ? "EN" : "BG"))),
-      h("nav", { class: "tabs" }, tab("register"), tab("transmittals"), tab("todos"), tab("settings")));
+      h("nav", { class: "tabs" }, tab("site", badge(this.siteDocs().filter((d) => !this.ackedByMe(d.key, d.current.revLabel)).length)), tab("register", badge(inbox)),
+        tab("transmittals"), tab("rfis", badge(openRfis)), tab("settings")));
   }
 
-  // ---------------- Register
+  // ---------------- За изпълнение (site set)
+  viewSite(body: HTMLElement) {
+    const docs = this.siteDocs();
+    const newForMe = docs.filter((d) => !this.ackedByMe(d.key, d.current.revLabel));
+    const rfisOpen = this.store.tracker.rfis.filter((r) => r.state === "open");
+    const overdue = rfisOpen.filter((r) => isOverdue(r.due, false)).length;
+    const inbox = this.reg.docs.filter((d) => d.status === "received" || d.status === "submitted").length;
+    const rootId = this.siteRootId();
+
+    // "Is it current?"
+    const out = h("div", { class: "current-out" });
+    const check = () => {
+      const q = this.siteQ.trim().toLowerCase().replace(/\s+/g, " ");
+      if (!q) { clear(out); return; }
+      const hits = this.reg.docs.filter((d) => d.label.toLowerCase().includes(q) || d.key.toLowerCase().includes(q) || d.current.name.toLowerCase().includes(q)).slice(0, 6);
+      if (!hits.length) { clear(out, h("div", { class: "cur no" }, h("b", null, t("currentNo")), " – ", t("noDocs"))); return; }
+      clear(out, hits.map((d) => {
+        const ok = d.status === "construction";
+        const siteRev = this.store.tracker.site[d.key]?.rev;
+        return h("div", { class: "cur " + (ok ? "yes" : "no"), onclick: () => this.openDoc(d.key) },
+          h("b", null, ok ? t("currentYes") : t("currentNo")), " · ",
+          h("span", { class: "mono" }, d.label), ` · ${t("currentRev")}: `, h("b", { class: "mono" }, ok ? d.current.revLabel : siteRev ?? "—"),
+          ok ? "" : h("span", { class: "muted" }, ` (${stLabel(d.status)} ${d.current.revLabel})`));
+      }));
+    };
+    const search = h("input", { type: "search", class: "big", placeholder: t("isCurrentHint"), value: this.siteQ, oninput: (e: Event) => { this.siteQ = (e.target as HTMLInputElement).value; check(); } });
+    body.append(h("div", { class: "currentbox" }, h("label", null, t("isCurrent")), search, out));
+    check();
+
+    const stat = (n: number | string, label: string, cls = "", onclick?: () => void) => h("div", { class: `stat ${cls}`, onclick }, h("div", { class: "n" }, n), h("div", { class: "l" }, label));
+    body.append(h("div", { class: "stats" },
+      stat(docs.length, t("st_construction").toLowerCase()),
+      stat(newForMe.length, t("newForMe"), newForMe.length ? "on" : ""),
+      stat(inbox, t("inbox").toLowerCase(), inbox ? "on" : "", () => { this.kind = "design"; this.status = "received"; this.go("register"); }),
+      stat(rfisOpen.length, t("openRfi"), "", () => this.go("rfis")),
+      overdue ? stat(overdue, t("overdueRfi"), "alert", () => this.go("rfis")) : ""));
+
+    const folderName = this.store.tracker.settings.siteFolder || DEFAULT_SITE_FOLDER;
+    body.append(h("div", { class: "hint" }, t("siteIntro"), " ", rootId
+      ? h("a", { href: folderUrl(this.host.projectId, rootId, this.host.location), target: "_top" }, `„${folderName}“`)
+      : h("b", null, `„${folderName}“`), "."));
+
+    if (!docs.length) { body.append(h("div", { class: "empty" }, t("siteEmpty"))); return; }
+    if (newForMe.length)
+      body.append(h("div", { class: "toolbar" }, h("button", { class: "primary", onclick: () => this.ackDocs(newForMe) }, `✓ ${t("ackAll")} (${newForMe.length})`)));
+
+    const parts = [...new Set(docs.map((d) => d.disc))].sort();
+    const rows: HTMLElement[] = [];
+    for (const p of parts) {
+      const list = docs.filter((d) => d.disc === p);
+      rows.push(h("tr", { class: "group" }, h("td", { colspan: 6 }, h("b", null, p), ` · ${DISCIPLINES[p]?.[getLang()] ?? ""} · ${list.length}`)));
+      for (const d of list) {
+        const acks = this.acksOf(d.key, d.current.revLabel);
+        const mine = this.ackedByMe(d.key, d.current.revLabel);
+        const copy = this.store.tracker.site[d.key];
+        rows.push(h("tr", { class: "row" + (mine ? "" : " fresh"), onclick: () => this.openDoc(d.key) },
+          h("td", { class: "key" }, d.label),
+          h("td", { class: "num" }, h("span", { class: "revbig" }, d.current.revLabel)),
+          h("td", { class: "title hide-sm" }, d.title || h("span", { class: "muted" }, d.current.name)),
+          h("td", { class: "date" }, bgDate(this.issuedAt(d.key, d.current.revLabel))),
+          h("td", { class: "hide-sm", title: acks.map((a) => `${a.by} ${bgDate(a.at)}`).join("\n") }, acks.length ? `✓ ${acks.length}` : h("span", { class: "muted" }, t("notAcked"))),
+          h("td", { onclick: (e: Event) => e.stopPropagation() },
+            copy ? h("button", { class: "link", onclick: () => this.openFile(copy.fileId) }, "PDF") : "",
+            mine ? h("span", { class: "okmark", title: t("acked") }, " ✓") : h("button", { class: "small", onclick: () => this.ackDocs([d]) }, t("ack")))));
+      }
+    }
+    body.append(h("div", { class: "tablewrap" }, h("table", null,
+      h("thead", null, h("tr", null, h("th", null, t("number")), h("th", null, t("rev")), h("th", { class: "hide-sm" }, t("title")), h("th", null, t("issued")),
+        h("th", { class: "hide-sm" }, t("ackedBy")), h("th", null, ""))),
+      h("tbody", null, rows))));
+  }
+
+  async ackDocs(docs: DocRow[]) {
+    await this.run(t("saving"), async () => {
+      const a = { by: this.host.user.name, byId: this.host.user.id, at: new Date().toISOString(), via: "app" as const };
+      await this.store.save((tr) => docs.reduce((n, d) => addAck(n, d.key, d.current.revLabel, a), tr));
+      this.toast(`${t("acked")}: ${docs.length}`);
+    });
+  }
+
+  // ---------------- Регистър
   filteredDocs(): DocRow[] {
     const q = this.q.trim().toLowerCase();
-    let docs = this.reg.docs.filter((d) =>
-      (!this.disc || d.disc === this.disc) &&
+    return this.reg.docs.filter((d) =>
+      d.kind === this.kind &&
       (!this.status || d.status === this.status) &&
+      (!this.part || d.disc === this.part) &&
       (!q || `${d.label} ${d.title} ${d.current.name} ${d.current.folderPath}`.toLowerCase().includes(q)));
-    const dir = this.sortDir;
-    const cmp: Record<string, (a: DocRow, b: DocRow) => number> = {
-      key: (a, b) => (a.kind === b.kind ? 0 : a.kind === "numbered" ? -1 : 1) || a.disc.localeCompare(b.disc) || a.label.localeCompare(b.label, undefined, { numeric: true }),
-      title: (a, b) => a.title.localeCompare(b.title),
-      status: (a, b) => STATUSES.indexOf(a.status) - STATUSES.indexOf(b.status),
-      modified: (a, b) => (a.current.modified ?? "").localeCompare(b.current.modified ?? ""),
-    };
-    docs = [...docs].sort((a, b) => cmp[this.sortCol](a, b) * dir || a.key.localeCompare(b.key));
-    return docs;
   }
 
   viewRegister(body: HTMLElement) {
-    const docs = this.reg.docs;
-    const count = (s: DocStatus) => docs.filter((d) => d.status === s).length;
-    const overdue = this.todoList.filter((x) => isOverdue(x.due, x.state === "Done")).length;
-    const lastTr = [...this.store.tracker.transmittals].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-    const stat = (n: number | string, label: string, on: boolean, onclick: () => void, cls = "") =>
-      h("div", { class: `stat ${on ? "on" : ""} ${cls}`, onclick }, h("div", { class: "n" }, n), h("div", { class: "l" }, label));
-    body.append(h("div", { class: "stats" },
-      stat(docs.length, t("documents"), !this.status, () => { this.status = ""; this.render(); }),
-      STATUSES.filter((s) => s !== "Superseded").map((s) =>
-        stat(count(s), t("st_" + s), this.status === s, () => { this.status = this.status === s ? "" : s; this.render(); })),
-      stat(overdue, `${t("todos").toLowerCase()} ${t("overdue")}`, false, () => { this.todoFilter = "overdue"; this.go("todos"); }, overdue ? "alert" : ""),
-      stat(lastTr ? lastTr.id : t("none"), `${t("lastTransmittal")}${lastTr ? " · " + fmtDate(lastTr.date) : ""}`, false, () => this.go("transmittals"))));
+    if (this.issue) { body.append(this.issuePanel()); return; }
+    if (this.upload) { body.append(this.uploadPanel()); return; }
+    const all = this.reg.docs;
+    // category chips
+    body.append(h("div", { class: "chips" }, KINDS.map((k) => {
+      const n = all.filter((d) => d.kind === k).length;
+      return h("button", { class: "chip" + (this.kind === k ? " on" : ""), onclick: () => { this.kind = k; this.status = ""; this.sel.clear(); this.render(); } }, `${t("kind_" + k)} · ${n}`);
+    })));
+    const ofKind = all.filter((d) => d.kind === this.kind);
+    body.append(h("div", { class: "chips small" },
+      h("button", { class: "chip" + (!this.status ? " on" : ""), onclick: () => { this.status = ""; this.render(); } }, `${t("all")} · ${ofKind.length}`),
+      STATUS_BY_KIND[this.kind].map((s) => {
+        const n = ofKind.filter((d) => d.status === s).length;
+        if (!n && s !== this.status) return "";
+        return h("button", { class: `chip st-chip s-${slug(s)}` + (this.status === s ? " on" : ""), onclick: () => { this.status = this.status === s ? "" : s; this.render(); } }, `${stLabel(s)} · ${n}`);
+      })));
 
-    const discs = [...new Set(docs.map((d) => d.disc))].sort();
     const tableBox = h("div", { class: "tablewrap" });
-    const selInfo = h("span", { class: "muted" });
-    const bulkBtn = h("button", { class: "primary", onclick: () => this.startTransmittal([...this.sel]) }, t("fromSelected"));
-    const bulkStatus = h("select", {
-      onchange: async (e: Event) => {
-        const v = (e.target as HTMLSelectElement).value as DocStatus;
-        if (!v) return;
-        const keys = [...this.sel];
-        await this.run(t("saving"), async () => {
-          await this.store.save((tr) => {
-            let n = tr;
-            for (const k of keys) {
-              const d = this.reg.docs.find((x) => x.key === k);
-              if (d) n = setStatus(n, d.key, d.current.revLabel, v, d.current.status, this.actor());
-            }
-            return n;
-          });
-          this.rebuild();
-          this.toast(`${keys.length} → ${t("st_" + v)}`);
-        });
-      },
-    }, h("option", { value: "" }, t("setStatus") + "…"), STATUSES.map((s) => h("option", { value: s }, t("st_" + s))));
-    const updateSel = () => {
-      selInfo.textContent = this.sel.size ? `${this.sel.size} ${t("selected")}` : "";
-      bulkBtn.disabled = !this.sel.size;
-      bulkStatus.disabled = !this.sel.size;
+    const actions = h("div", { class: "actions-bar" });
+    const parts = [...new Set(ofKind.map((d) => d.disc))].sort();
+    body.append(h("div", { class: "toolbar" },
+      h("input", { type: "search", placeholder: t("search"), value: this.q, oninput: (e: Event) => { this.q = (e.target as HTMLInputElement).value; draw(); } }),
+      parts.length > 1 ? h("select", { onchange: (e: Event) => { this.part = (e.target as HTMLSelectElement).value; draw(); } },
+        h("option", { value: "" }, t("part") + ": " + t("all")),
+        parts.map((p) => h("option", { value: p, selected: this.part === p }, p))) : "",
+      h("span", { class: "grow" }),
+      this.canEdit ? h("button", { onclick: () => { this.upload = { folderId: "", newFolder: "", files: [], from: "", kind: this.kind }; this.render(); } }, "⇪ " + t("uploadReceived")) : "",
+      h("button", { onclick: () => this.exportCsv() }, t("exportCsv"))));
+    body.append(actions, tableBox);
+
+    const drawActions = () => {
+      const docs = this.reg.docs.filter((d) => this.sel.has(d.key));
+      if (!docs.length || !this.canEdit) { clear(actions); actions.hidden = true; return; }
+      actions.hidden = false;
+      const issuable = docs.every(canIssue);
+      clear(actions,
+        h("span", null, `${docs.length} ${t("selected")}`),
+        h("button", { class: "primary", disabled: !issuable, title: issuable ? "" : "Само получени проектни документи или одобрени работни чертежи (A/B)", onclick: () => this.startIssue(docs.map((d) => d.key)) }, `▶ ${t("issue")}`),
+        this.kind === "design" ? h("button", { onclick: () => this.bulkStatus(docs, "info") }, t("markInfo")) : "",
+        this.kind === "design" ? h("button", { onclick: () => this.bulkStatus(docs, "review") }, t("markReview")) : "",
+        h("select", { onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value as DocStatus; if (v) this.bulkStatus(docs, v); } },
+          h("option", { value: "" }, t("setStatus") + "…"), STATUS_BY_KIND[this.kind].map((s) => h("option", { value: s }, stLabel(s)))),
+        h("select", { onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value as Kind; if (v) this.bulkKind(docs, v); } },
+          h("option", { value: "" }, t("setKind") + "…"), KINDS.filter((k) => k !== this.kind).map((k) => h("option", { value: k }, "→ " + t("kind_" + k)))),
+        h("button", { onclick: () => this.startRfi(docs.map((d) => d.key)) }, t("newRfi")),
+        h("button", { class: "link", onclick: () => { this.sel.clear(); draw(); } }, "×"));
     };
 
-    const search = h("input", { type: "search", placeholder: t("search"), value: this.q, oninput: (e: Event) => { this.q = (e.target as HTMLInputElement).value; drawTable(); } });
-    body.append(h("div", { class: "toolbar" },
-      search,
-      h("select", { onchange: (e: Event) => { this.disc = (e.target as HTMLSelectElement).value; drawTable(); } },
-        h("option", { value: "" }, t("allDisciplines")),
-        discs.map((d) => h("option", { value: d, selected: this.disc === d }, `${d} · ${DISCIPLINES[d]?.[getLang()] ?? d}`))),
-      h("select", { onchange: (e: Event) => { this.status = (e.target as HTMLSelectElement).value; this.render(); } },
-        h("option", { value: "" }, t("allStatuses")),
-        STATUSES.map((s) => h("option", { value: s, selected: this.status === s }, t("st_" + s)))),
-      h("span", { class: "grow" }),
-      selInfo, bulkStatus, bulkBtn,
-      h("button", { onclick: () => this.exportCsv() }, t("exportCsv"))));
-    body.append(tableBox);
-
-    const drawTable = () => {
+    const draw = () => {
       const list = this.filteredDocs();
-      if (!this.reg.docs.length) { clear(tableBox, h("div", { class: "empty" }, t("noDocs"))); updateSel(); return; }
-      const th = (label: string, col?: typeof this.sortCol, cls = "") => h("th", {
-        class: (col ? "sort " : "") + cls,
-        onclick: col ? () => { this.sortDir = this.sortCol === col ? -this.sortDir : 1; this.sortCol = col; drawTable(); } : null,
-      }, label, col && this.sortCol === col ? (this.sortDir > 0 ? " ↑" : " ↓") : "");
-      const allCb = h("input", { type: "checkbox", checked: list.length > 0 && list.every((d) => this.sel.has(d.key)),
-        onchange: (e: Event) => { const on = (e.target as HTMLInputElement).checked; list.forEach((d) => on ? this.sel.add(d.key) : this.sel.delete(d.key)); drawTable(); } });
+      if (!list.length) { clear(tableBox, h("div", { class: "empty" }, t("noDocs"))); drawActions(); return; }
+      const allCb = h("input", { type: "checkbox", checked: list.every((d) => this.sel.has(d.key)),
+        onchange: (e: Event) => { const on = (e.target as HTMLInputElement).checked; list.forEach((d) => (on ? this.sel.add(d.key) : this.sel.delete(d.key))); draw(); } });
       const rows: HTMLElement[] = [];
-      let lastDisc = "";
+      let last = "";
       for (const d of list) {
-        const grp = d.kind === "file" ? `f:${d.current.folderPath}` : d.disc;
-        if (this.sortCol === "key" && grp !== lastDisc) {
-          lastDisc = grp;
-          const n = list.filter((x) => (x.kind === "file" ? `f:${x.current.folderPath}` : x.disc) === grp).length;
-          rows.push(h("tr", { class: "group" }, h("td", { colspan: 8 }, d.kind === "file"
-            ? [h("b", null, d.disc), ` · ${d.current.folderPath} · ${n}`]
-            : [h("b", null, d.disc), ` · ${DISCIPLINES[d.disc]?.[getLang()] ?? ""} · ${n}`])));
+        const grp = d.source === "file" ? d.current.folderPath : d.disc;
+        if (grp !== last) {
+          last = grp;
+          rows.push(h("tr", { class: "group" }, h("td", { colspan: 7 }, h("b", null, d.disc), d.source === "file" ? ` · ${d.current.folderPath}` : ` · ${DISCIPLINES[d.disc]?.[getLang()] ?? ""}`)));
         }
         const cb = h("input", { type: "checkbox", checked: this.sel.has(d.key), onclick: (e: Event) => e.stopPropagation(),
-          onchange: (e: Event) => { (e.target as HTMLInputElement).checked ? this.sel.add(d.key) : this.sel.delete(d.key); (cb.closest("tr") as HTMLElement).classList.toggle("sel"); updateSel(); } });
+          onchange: (e: Event) => { (e.target as HTMLInputElement).checked ? this.sel.add(d.key) : this.sel.delete(d.key); (cb.closest("tr") as HTMLElement).classList.toggle("sel"); drawActions(); } });
         rows.push(h("tr", { class: "row" + (this.sel.has(d.key) ? " sel" : ""), onclick: () => this.openDoc(d.key) },
-          h("td", { class: "cb" }, cb),
-          h("td", { class: "key" }, d.label),
-          h("td", { class: "num" }, d.current.revLabel, d.revs.length > 1 ? h("span", { class: "muted" }, ` /${d.revs.length}`) : "",
-            d.current.duplicates ? h("span", { class: "warnmark", title: "duplicate file names" }, " ⚠") : ""),
-          h("td", { class: "title" }, d.title || h("span", { class: "muted" }, d.current.name)),
-          h("td", { class: "hide-sm" }, h("span", { class: "tag", title: DOC_TYPES[d.type]?.[getLang()] ?? "" }, d.type)),
-          h("td", { onclick: (e: Event) => e.stopPropagation() }, this.statusSelect(d.key, d.current.revLabel, d.status)),
-          h("td", { class: "date" }, fmtDate(d.current.modified), d.current.modifiedBy ? h("span", { class: "muted hide-sm" }, ` · ${d.current.modifiedBy}`) : ""),
-          h("td", { class: "hide-sm" }, d.transmittals.slice(-2).map((x) => h("span", { class: "tag" }, x)))));
+          h("td", { class: "cb" }, this.canEdit ? cb : ""),
+          h("td", { class: "key" }, d.label, this.store.tracker.site[d.key] ? h("span", { class: "sitemark", title: t("st_construction") }, " ●") : ""),
+          h("td", { class: "num" }, d.current.revLabel, d.revs.length > 1 ? h("span", { class: "muted" }, ` /${d.revs.length}`) : ""),
+          h("td", { class: "title hide-sm" }, d.title || h("span", { class: "muted" }, d.current.name)),
+          h("td", { onclick: (e: Event) => e.stopPropagation() }, this.statusCell(d, d.current.revLabel, d.status)),
+          h("td", { class: "date hide-sm" }, fmtDate(d.current.modified), d.current.modifiedBy ? h("span", { class: "muted" }, ` · ${d.current.modifiedBy}`) : ""),
+          h("td", { class: "hide-sm" }, d.transmittals.slice(-1).map((x) => h("span", { class: "tag" }, x)))));
       }
       clear(tableBox, h("table", null,
-        h("thead", null, h("tr", null, h("th", { class: "cb" }, allCb), th(t("number"), "key"), th(t("rev")), th(t("title"), "title"),
-          th(t("type"), undefined, "hide-sm"), th(t("status"), "status"), th(t("modified"), "modified"), th(t("transmittals"), undefined, "hide-sm"))),
+        h("thead", null, h("tr", null, h("th", { class: "cb" }, this.canEdit ? allCb : ""), h("th", null, t("number")), h("th", null, t("rev")), h("th", { class: "hide-sm" }, t("title")),
+          h("th", null, t("status")), h("th", { class: "hide-sm" }, t("modified")), h("th", { class: "hide-sm" }, t("transmittals")))),
         h("tbody", null, rows)));
-      updateSel();
+      drawActions();
     };
-    drawTable();
+    draw();
 
-    if (this.reg.unnumbered.length)
+    if (this.reg.unnumbered.length && this.kind === "design")
       body.append(h("details", { class: "unnum" },
         h("summary", null, `${t("unnumbered")} (${this.reg.unnumbered.length})`),
-        h("div", { class: "tablewrap" }, h("table", null,
-          h("thead", null, h("tr", null, h("th", null, "File"), h("th", null, t("folder")), h("th", null, t("modified")))),
-          h("tbody", null, this.reg.unnumbered.map((f) => h("tr", null,
-            h("td", null, f.name), h("td", { class: "soft" }, f.folderPath), h("td", { class: "date" }, fmtDate(f.modified), f.modifiedBy ? ` · ${f.modifiedBy}` : ""))))))));
+        h("div", { class: "tablewrap" }, h("table", null, h("tbody", null, this.reg.unnumbered.map((f) => h("tr", null,
+          h("td", null, f.name), h("td", { class: "soft hide-sm" }, f.folderPath), h("td", { class: "date" }, fmtDate(f.modified)))))))));
   }
 
-  statusSelect(key: string, rev: string, cur: DocStatus) {
-    return h("select", { class: "stsel", onchange: (e: Event) => this.changeStatus(key, rev, (e.target as HTMLSelectElement).value as DocStatus) },
-      STATUSES.map((s) => h("option", { value: s, selected: s === cur }, t("st_" + s))));
+  statusCell(d: DocRow, rev: string, cur: DocStatus) {
+    const editable = this.canEdit && cur !== "superseded" && !(d.kind === "submittal" && ["A", "B", "C", "D"].includes(cur) && !can.decide(this.access.role));
+    if (!editable) return h("span", { class: `st s-${slug(cur)}` }, stLabel(cur));
+    const opts = STATUS_BY_KIND[d.kind].filter((s) => s !== "superseded" && (d.kind !== "submittal" || !["A", "B", "C", "D"].includes(s) || can.decide(this.access.role)));
+    return h("select", { class: `stsel s-${slug(cur)}`, onchange: (e: Event) => this.changeStatus(d, rev, (e.target as HTMLSelectElement).value as DocStatus) },
+      opts.map((s) => h("option", { value: s, selected: s === cur }, stLabel(s))));
+  }
+
+  async changeStatus(d: DocRow, rev: string, to: DocStatus) {
+    if (to === "construction") { this.startIssue([d.key]); return; }
+    if (d.kind === "submittal" && ["A", "B", "C", "D"].includes(to)) { await this.decide(d, to as any, ""); return; }
+    const from = this.statusOf(d.key, rev);
+    if (from === to) return;
+    await this.run(t("saving"), async () => {
+      await this.store.save((tr) => setStatus(tr, d.key, rev, to, from, this.actor()));
+      this.rebuild();
+      this.toast(`${d.label} ${rev} → ${stLabel(to)}`);
+    });
+  }
+
+  async bulkStatus(docs: DocRow[], to: DocStatus) {
+    if (to === "construction") { this.startIssue(docs.map((d) => d.key)); return; }
+    await this.run(t("saving"), async () => {
+      await this.store.save((tr) => docs.reduce((n, d) => (d.status === "superseded" ? n : setStatus(n, d.key, d.current.revLabel, to, d.status, this.actor())), tr));
+      this.sel.clear();
+      this.rebuild();
+      this.toast(`${docs.length} → ${stLabel(to)}`);
+    });
+  }
+
+  async bulkKind(docs: DocRow[], kind: Kind) {
+    await this.run(t("saving"), async () => {
+      await this.store.save((tr) => docs.reduce((n, d) => setMeta(n, d.key, { kind }), tr));
+      this.sel.clear();
+      this.rebuild();
+      this.kind = kind;
+      this.toast(`${docs.length} → ${t("kind_" + kind)}`);
+    });
+  }
+
+  async decide(d: DocRow, decision: "A" | "B" | "C" | "D", remark: string) {
+    await this.run(t("saving"), async () => {
+      const w = await decideSubmittal(this.ctx, d, decision, remark);
+      await this.reloadFiles();
+      if (w.length) this.error = w.join(" · ");
+      this.toast(`${d.label} → ${stLabel(decision)}`);
+    });
+  }
+
+  // ---------------- upload received files (the GC receives designs by email and files them in Connect)
+  folderOptions(): { id: string; path: string }[] {
+    const out: { id: string; path: string }[] = [];
+    for (const [id, f] of this.reg.folders) {
+      if (this.reg.siteFolderIds.has(id)) continue;
+      const parts: string[] = [];
+      let cur: SnapshotItem | undefined = f;
+      let skip = false;
+      while (cur) { if (cur.nm === "_ArstenDocs") skip = true; parts.unshift(cur.nm); cur = cur.pid ? this.reg.folders.get(cur.pid) : undefined; }
+      if (!skip) out.push({ id, path: parts.join(" / ") });
+    }
+    return out.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  uploadPanel() {
+    const u = this.upload!;
+    const folders = this.folderOptions();
+    const list = h("div", { class: "muted small" });
+    const drawList = () => clear(list, u.files.map((f) => {
+      const exists = this.items.some((i) => i.tp === "FILE" && !i.del && i.pid === u.folderId && i.nm === f.name);
+      return h("div", null, `${f.name} · ${Math.round(f.size / 1024)} KB`, exists ? h("b", { class: "okmark" }, ` – ${t("newRevision")}`) : "");
+    }));
+    if (u.done) {
+      return h("div", { class: "panel" }, h("h2", null, `✓ ${t("uploaded")}: ${u.done.length}`), h("div", null, u.done.map((n) => h("div", { class: "soft" }, n))),
+        h("p", { class: "hint" }, t("uploadNext")),
+        h("div", { class: "actions" }, h("button", { class: "primary", onclick: () => { this.upload = null; this.kind = u.kind; this.status = DEFAULT_FOR[u.kind]; this.render(); } }, t("register") + " →")));
+    }
+    const fileInput = h("input", { type: "file", multiple: true, accept: ".pdf,.dwg,.dxf,.ifc,.docx,.xlsx,.zip,image/*",
+      onchange: (e: Event) => { u.files = [...((e.target as HTMLInputElement).files ?? [])]; drawList(); } });
+    return h("div", { class: "panel" },
+      h("h2", null, t("uploadReceived")),
+      h("p", { class: "hint" }, t("uploadHint")),
+      h("div", { class: "form" },
+        h("label", null, t("folder")), h("select", { onchange: (e: Event) => { u.folderId = (e.target as HTMLSelectElement).value; drawList(); } },
+          h("option", { value: "" }, "—"), folders.map((f) => h("option", { value: f.id, selected: f.id === u.folderId }, f.path))),
+        h("label", null, t("newSubfolder")), h("input", { value: u.newFolder, placeholder: "напр. 2026-11-17 Пакет от проектанта", oninput: (e: Event) => { u.newFolder = (e.target as HTMLInputElement).value; } }),
+        h("label", null, t("kind")), h("select", { onchange: (e: Event) => { u.kind = (e.target as HTMLSelectElement).value as Kind; } },
+          KINDS.map((k) => h("option", { value: k, selected: k === u.kind }, t("kind_" + k)))),
+        h("label", null, t("receivedFrom")), h("input", { value: u.from, placeholder: "проектант / доставчик", oninput: (e: Event) => { u.from = (e.target as HTMLInputElement).value; } }),
+        h("label", null, t("files")), h("div", null, fileInput, list)),
+      h("div", { class: "actions" },
+        h("button", { class: "primary", onclick: () => this.doUpload() }, "⇪ " + t("uploadReceived")),
+        h("button", { onclick: () => { this.upload = null; this.render(); } }, t("cancel"))));
+  }
+
+  async doUpload() {
+    const u = this.upload!;
+    if (!u.files.length) { alert(t("files") + "?"); return; }
+    if (!u.folderId && !u.newFolder.trim()) { alert(t("folder") + "?"); return; }
+    await this.run(t("saving"), async () => {
+      const api = this.host.api;
+      let folderId = u.folderId || (await api.rootFolderId());
+      if (u.newFolder.trim()) folderId = await api.createFolder(u.newFolder.trim().replace(/[\/:*?"<>|]+/g, "-"), folderId);
+      const done: string[] = [];
+      const ids: string[] = [];
+      for (const [i, f] of u.files.entries()) {
+        this.busy = `${i + 1}/${u.files.length} ${f.name}`; this.renderBusy();
+        const r = await api.upload(folderId, f.name, f);
+        done.push(f.name);
+        ids.push(r.fileId);
+      }
+      await this.reloadFiles();
+      // register the package and the category of the new documents
+      const keys = this.reg.docs.filter((d) => d.revs.some((r) => ids.includes(r.fileId))).map((d) => `${d.key}@${d.current.revLabel}`);
+      await this.store.save((tr) => {
+        let n = tr;
+        if (u.kind !== "design") for (const k of keys) n = setMeta(n, k.split("@")[0], { kind: u.kind });
+        const pkgId = nextPackageId(n, this.projectCode());
+        return { ...n, packages: [...n.packages, { id: pkgId, date: today(), from: u.from.trim(), by: this.host.user.name, createdAt: new Date().toISOString(), items: keys }] };
+      });
+      this.rebuild();
+      u.done = done;
+    });
+  }
+
+  // ---------------- issue for construction
+  startIssue(keys: string[]) {
+    const docs = keys.map((k) => this.doc(k)).filter((d): d is DocRow => !!d && canIssue(d));
+    if (!docs.length) return;
+    this.issue = { keys: docs.map((d) => d.key), to: "Обект / Site", attn: "", note: "", date: today() };
+    this.tab = "register";
+    this.openKey = "";
+    this.render();
+  }
+
+  issuePanel() {
+    const s = this.issue!;
+    const docs = s.keys.map((k) => this.doc(k)).filter(Boolean) as DocRow[];
+    const set = (k: "to" | "attn" | "note" | "date") => (e: Event) => { (s as any)[k] = (e.target as HTMLInputElement).value; };
+    const ack = this.store.tracker.settings.ackAssignee;
+    const folder = this.store.tracker.settings.siteFolder || DEFAULT_SITE_FOLDER;
+    if (s.result) {
+      const r = s.result;
+      return h("div", { class: "panel" },
+        h("h2", null, `✓ ${t("issuedOk")}: ${r.tr.id}`),
+        h("p", null, `${r.tr.items.length} ${t("documents")} · ${r.copies} ${t("copies")} „${folder}“`, r.todoId ? ` · ${t("ackTodo")} → ${ack?.name ?? ""}` : ""),
+        r.warnings.length ? h("div", { class: "banner error" }, h("b", null, t("warnings") + ": "), h("ul", null, r.warnings.map((w) => h("li", null, w)))) : "",
+        h("div", { class: "actions" },
+          r.tr.pdfFileId ? h("button", { onclick: () => this.openFile(r.tr.pdfFileId!) }, `${t("pdf")} ${r.tr.id}`) : "",
+          h("button", { onclick: () => this.mailDraft(r.tr) }, `✉ ${t("mailDraft")}`),
+          h("button", { class: "primary", onclick: () => { this.issue = null; this.sel.clear(); this.go("site"); } }, t("site") + " →"),
+          h("button", { onclick: () => { this.issue = null; this.sel.clear(); this.render(); } }, t("close"))));
+    }
+    return h("div", { class: "panel issue" },
+      h("h2", null, t("issueTitle"), h("span", { class: "mono muted", style: "font-size:13px;margin-left:10px" }, nextTransmittalId(this.store.tracker, this.projectCode()))),
+      h("div", { class: "tablewrap" }, h("table", null, h("tbody", null, docs.map((d) => {
+        const prev = this.store.tracker.site[d.key];
+        return h("tr", null, h("td", { class: "key" }, d.label), h("td", { class: "num" }, h("span", { class: "revbig" }, d.current.revLabel)),
+          h("td", { class: "hide-sm" }, d.title || d.current.name), h("td", { class: "muted" }, prev ? `${t("st_superseded").toLowerCase()}: ${prev.rev}` : ""));
+      })))),
+      h("div", { class: "explain" }, h("b", null, t("issueWhat")), h("ol", null,
+        h("li", null, t("issueStep1")),
+        h("li", null, t("issueStep2"), ` „${folder}/<${t("part").toLowerCase()}>“`),
+        h("li", null, t("issueStep3")),
+        h("li", null, t("issueStep4"), " ", ack ? h("b", null, ack.name) : h("span", { class: "muted" }, t("issueNoAck"))))),
+      h("div", { class: "form" },
+        h("label", null, t("to")), h("input", { value: s.to, oninput: set("to"), list: "recips" }),
+        h("datalist", { id: "recips" }, [...new Set(this.store.tracker.transmittals.map((x) => x.to))].map((r) => h("option", { value: r }))),
+        h("label", null, t("attn")), h("input", { value: s.attn, oninput: set("attn") }),
+        h("label", null, t("date")), h("input", { type: "date", value: s.date, oninput: set("date") }),
+        h("label", null, t("note")), h("textarea", { rows: 2, oninput: set("note") }, s.note)),
+      h("div", { class: "actions" },
+        h("button", { class: "primary", disabled: !!this.busy, onclick: () => this.doIssue() }, `▶ ${t("issue")} (${docs.length})`),
+        h("button", { onclick: () => { this.issue = null; this.render(); } }, t("cancel"))));
+  }
+
+  async doIssue() {
+    const s = this.issue!;
+    const docs = s.keys.map((k) => this.doc(k)).filter(Boolean) as DocRow[];
+    await this.run(t("saving"), async () => {
+      const r = await issueForConstruction(this.ctx, docs, { to: s.to, attn: s.attn, note: s.note, date: s.date }, this.statusOf);
+      this.busy = "PDF…"; this.renderBusy();
+      await this.attachPdf(r.tr);
+      await this.reloadFiles();
+      r.tr = this.store.tracker.transmittals.find((x) => x.id === r.tr.id) ?? r.tr;
+      s.result = r;
+      this.todoStates = await ackTodoStates(this.host.api, this.store.tracker.transmittals);
+    });
+  }
+
+  mailDraft(tr: Transmittal) {
+    const lines = tr.items.map((i) => `- ${i.label ?? i.key} ${i.rev}${i.title ? " – " + i.title : ""}`);
+    const body = [
+      `Здравейте,`, ``, `Издаваме за изпълнение (${tr.id}, ${bgDate(tr.date)}):`, ...lines, ``,
+      `Текущите чертежи са в Trimble Connect, проект „${this.host.projectName}“, папка „${this.store.tracker.settings.siteFolder || DEFAULT_SITE_FOLDER}“.`,
+      `Моля, потвърдете получаването.`, ``, this.host.user.name, `Arsten / MULTIPLAN`,
+    ].join("\n");
+    const href = `mailto:?subject=${encodeURIComponent(`${tr.id} – ${t("pu_" + tr.purpose)} – ${this.host.projectName}`)}&body=${encodeURIComponent(body)}`;
+    window.open(href, "_blank");
+  }
+
+  // ---------------- document drawer
+  openDoc(key: string) {
+    document.querySelectorAll(".drawer, .drawer-bg").forEach((e) => e.remove());
+    const d = this.doc(key);
+    this.openKey = d ? key : "";
+    if (!d) return;
+    const close = () => { this.openKey = ""; bg.remove(); dr.remove(); };
+    const tr = this.store.tracker;
+    const log = tr.log.filter((l) => l.key === key).slice().reverse();
+    const trs = tr.transmittals.filter((x) => x.items.some((i) => i.key === key));
+    const rfis = tr.rfis.filter((r) => r.docs.includes(key));
+    const acks = this.acksOf(key, d.current.revLabel);
+    const copy = tr.site[key];
+    const bg = h("div", { class: "drawer-bg", onclick: close });
+    const metaBox = h("div");
+    const drawMeta = (editing: boolean) => {
+      const m = d.meta;
+      if (!editing) {
+        clear(metaBox, h("div", { class: "metagrid" },
+          h("span", null, t("kind")), h("b", null, t("kind_" + d.kind)),
+          h("span", null, t("part")), h("b", null, d.disc),
+          h("span", null, t("type")), h("b", null, d.type),
+          m.form ? [h("span", null, t("meta_form")), h("b", null, m.form)] : "",
+          m.location ? [h("span", null, t("meta_location")), h("b", null, m.location)] : "",
+          m.originator ? [h("span", null, t("meta_originator")), h("b", null, m.originator)] : "",
+          h("span", null, t("folder")), h("span", null, d.current.folderPath)),
+          this.canEdit ? h("button", { class: "link", onclick: () => drawMeta(true) }, "✎ " + t("editMeta")) : "");
+        return;
+      }
+      const v: DocMeta = { ...m };
+      const field = (k: keyof DocMeta, label: string) => [h("label", null, label), h("input", { value: (v as any)[k] ?? "", oninput: (e: Event) => { (v as any)[k] = (e.target as HTMLInputElement).value.trim(); } })];
+      clear(metaBox, h("div", { class: "form tight" },
+        h("label", null, t("kind")), h("select", { onchange: (e: Event) => { v.kind = (e.target as HTMLSelectElement).value as Kind; } },
+          KINDS.map((k) => h("option", { value: k, selected: k === d.kind }, t("kind_" + k)))),
+        field("number", t("meta_number")), field("title", t("meta_title")), field("part", t("meta_part")), field("type", t("meta_type")),
+        field("form", t("meta_form")), field("location", t("meta_location")), field("originator", t("meta_originator"))),
+        h("div", { class: "actions" },
+          h("button", { class: "primary", onclick: () => this.run(t("saving"), async () => { await this.store.save((x) => setMeta(x, key, v)); this.rebuild(); }) }, t("save")),
+          h("button", { onclick: () => drawMeta(false) }, t("cancel"))));
+    };
+    drawMeta(false);
+    const decision = h("div");
+    if (d.kind === "submittal" && can.decide(this.access.role) && d.status !== "superseded" && d.status !== "construction") {
+      const remark = h("input", { placeholder: t("note") });
+      clear(decision, h("h3", null, t("decide")), remark, h("div", { class: "actions wrap" },
+        (["A", "B", "C", "D"] as const).map((x) => h("button", { class: `dec dec-${x}`, onclick: () => this.decide(d, x, (remark as HTMLInputElement).value) }, stLabel(x)))));
+    }
+    const dr = h("div", { class: "drawer" },
+      h("button", { class: "close", onclick: close }, t("close")),
+      h("div", { class: "mono muted" }, `${t("kind_" + d.kind)} · ${d.disc}`),
+      h("h2", null, d.label),
+      h("div", { class: "soft" }, d.title || d.current.name),
+      h("div", { class: "bigstatus" }, h("span", { class: `st s-${slug(d.status)}` }, stLabel(d.status)), " ", h("span", { class: "revbig" }, d.current.revLabel)),
+      h("div", { class: "actions wrap" },
+        this.canEdit && canIssue(d) ? h("button", { class: "primary", onclick: () => { close(); this.startIssue([key]); } }, `▶ ${t("issue")}`) : "",
+        copy ? h("button", { onclick: () => this.openFile(copy.fileId) }, `PDF „${t("st_construction")}“`) : "",
+        h("button", { onclick: () => this.openFile(d.current.fileId, d.current.versionId) }, t("download") + " (оригинал)"),
+        d.status === "construction" && !this.ackedByMe(key, d.current.revLabel) ? h("button", { onclick: () => this.ackDocs([d]) }, "✓ " + t("ack")) : "",
+        this.canEdit ? h("button", { onclick: () => { close(); this.startRfi([key]); } }, t("newRfi")) : "",
+        this.canEdit && copy ? h("button", { class: "danger", onclick: () => this.withdraw(d) }, t("withdraw")) : ""),
+      decision,
+      h("h3", null, t("editMeta")), metaBox,
+      h("h3", null, t("revisions")),
+      d.source === "file" ? this.versionTable(d) : h("table", null, h("tbody", null, [...d.revs].reverse().map((r) => h("tr", null,
+        h("td", { class: "num" }, r.revLabel),
+        h("td", null, r === d.current ? this.statusCell(d, r.revLabel, r.status) : h("span", { class: `st s-${slug(r.status)}` }, stLabel(r.status))),
+        h("td", { class: "date" }, fmtDate(r.modified), r.modifiedBy ? ` · ${r.modifiedBy}` : ""),
+        h("td", null, h("button", { class: "link", onclick: () => this.openFile(r.fileId, r.versionId) }, t("download"))))))),
+      d.status === "construction" ? [h("h3", null, `${t("ackedBy")} (${d.current.revLabel})`),
+        acks.length ? h("div", null, acks.map((a) => h("div", { class: "soft" }, `✓ ${a.by} · ${bgDate(a.at)}`))) : h("div", { class: "muted" }, t("notAcked"))] : "",
+      h("h3", null, t("statusLog")),
+      log.length ? h("table", null, h("tbody", null, log.map((l) => h("tr", null,
+        h("td", { class: "date" }, fmtDate(l.at)), h("td", { class: "num" }, l.rev),
+        h("td", null, `${stLabel(l.from)} → `, h("span", { class: `st s-${slug(l.to)}` }, stLabel(l.to))),
+        h("td", { class: "soft" }, l.by, l.transmittal ? h("span", { class: "tag", style: "margin-left:6px" }, l.transmittal) : "", l.note ? ` – ${l.note}` : ""))))) : h("div", { class: "muted" }, t("noLog")),
+      h("h3", null, t("transmittals")),
+      trs.length ? h("table", null, h("tbody", null, trs.map((x) => h("tr", null,
+        h("td", { class: "num" }, x.id), h("td", { class: "date" }, fmtDate(x.date)), h("td", null, x.to),
+        h("td", null, x.items.filter((i) => i.key === key).map((i) => i.rev).join(", ")), h("td", null, t("pu_" + x.purpose)))))) : h("div", { class: "muted" }, t("none")),
+      h("h3", null, t("rfis")),
+      rfis.length ? h("div", null, rfis.map((r) => h("div", { class: "soft link-row", onclick: () => { close(); this.rfiOpen = r.id; this.go("rfis"); } }, `${r.id} · ${r.title} · ${t("rfiState_" + r.state)}`))) : h("div", { class: "muted" }, t("none")));
+    document.body.append(bg, dr);
+  }
+
+  /** File documents: revisions are Connect versions, loaded on demand. */
+  versionTable(d: DocRow) {
+    const box = h("div", { class: "muted" }, t("loading"));
+    this.host.api.versions(d.current.fileId).then((vs) => {
+      const st = this.store.tracker.status;
+      clear(box, h("table", null, h("tbody", null, vs.map((v) => {
+        const lbl = `v${v.revision}`;
+        const cur = v.revision === d.current.rev;
+        const stored = st[revId(d.key, lbl)];
+        const status: DocStatus = cur ? d.status : !stored || stored === "construction" ? "superseded" : stored;
+        return h("tr", null,
+          h("td", { class: "num" }, lbl),
+          h("td", null, cur ? this.statusCell(d, lbl, d.status) : h("span", { class: `st s-${slug(status)}` }, stLabel(status))),
+          h("td", { class: "date" }, fmtDate(v.modified), v.modifiedBy ? ` · ${v.modifiedBy}` : ""),
+          h("td", null, h("button", { class: "link", onclick: () => this.openFile(d.current.fileId, v.versionId) }, t("download"))));
+      }))));
+      box.className = "";
+    }).catch((e) => { box.textContent = `${t("error")}: ${e?.message ?? e}`; });
+    return box;
+  }
+
+  async withdraw(d: DocRow) {
+    const note = prompt(`${t("withdraw")}: ${d.label} ${d.current.revLabel}?`, "");
+    if (note === null) return;
+    await this.run(t("saving"), async () => {
+      await withdrawFromSite(this.ctx, d, note);
+      await this.reloadFiles();
+      this.toast(`${d.label} → ${stLabel("superseded")}`);
+    });
   }
 
   async openFile(fileId: string, versionId?: string) {
@@ -313,260 +744,230 @@ class App {
     }
   }
 
-  openKey = "";
-
-  labelOf(key: string) { return this.reg.docs.find((d) => d.key === key)?.label ?? key; }
-
-  /** File documents: revisions are Connect versions, loaded on demand. */
-  versionTable(d: DocRow) {
-    const box = h("div", { class: "muted" }, t("loading"));
-    this.host.api.versions(d.current.fileId).then((vs) => {
-      const st = this.store.tracker.status;
-      clear(box, h("table", null, h("tbody", null, vs.map((v) => {
-        const lbl = `v${v.revision}`;
-        const cur = v.revision === d.current.rev;
-        // an older version is replaced by the newer upload, whatever it was marked
-        const stored = st[`${d.key}@${lbl}`] as DocStatus | undefined;
-        const status: DocStatus = cur ? d.status : stored === "Issued" || !stored ? "Superseded" : stored;
-        return h("tr", null,
-          h("td", { class: "num" }, lbl),
-          h("td", null, cur ? this.statusSelect(d.key, lbl, d.status) : h("span", { class: `st s-${slug(status)}` }, t("st_" + status))),
-          h("td", { class: "date" }, fmtDate(v.modified), v.modifiedBy ? ` · ${v.modifiedBy}` : ""),
-          h("td", null, h("button", { class: "link", onclick: () => this.openFile(d.current.fileId, v.versionId) }, t("download"))));
-      }))));
-      box.className = "";
-    }).catch((e) => { box.textContent = `${t("error")}: ${e?.message ?? e}`; });
-    return box;
-  }
-
-  openDoc(key: string) {
-    document.querySelectorAll(".drawer, .drawer-bg").forEach((e) => e.remove());
-    const d = this.reg.docs.find((x) => x.key === key);
-    this.openKey = d ? key : "";
-    if (!d) return;
-    const close = () => { this.openKey = ""; bg.remove(); dr.remove(); };
-    const log = this.store.tracker.log.filter((l) => l.key === key).slice().reverse();
-    const trs = this.store.tracker.transmittals.filter((x) => x.items.some((i) => i.key === key));
-    const todos = this.todoList.filter((x) => x.docKey === key);
-    const bg = h("div", { class: "drawer-bg", onclick: close });
-    const dr = h("div", { class: "drawer" },
-      h("button", { class: "close", onclick: close }, t("close")),
-      h("div", { class: "mono muted" }, d.kind === "file" ? `${d.current.folderPath} · ${d.type}` : `${d.disc} · ${DISCIPLINES[d.disc]?.[getLang()] ?? ""} · ${DOC_TYPES[d.type]?.[getLang()] ?? d.type}`),
-      h("h2", null, d.label),
-      h("div", { class: "soft" }, d.title),
-      h("h3", null, t("revisions")),
-      d.kind === "file" ? this.versionTable(d) : h("table", null, h("tbody", null, [...d.revs].reverse().map((r) => h("tr", null,
-        h("td", { class: "num" }, r.revLabel),
-        h("td", null, this.statusSelect(d.key, r.revLabel, r.status)),
-        h("td", { class: "date" }, fmtDate(r.modified), r.modifiedBy ? ` · ${r.modifiedBy}` : "", r.connectVersion && r.connectVersion > 1 ? h("span", { class: "muted" }, ` · v${r.connectVersion}`) : ""),
-        h("td", null, h("button", { class: "link", onclick: () => this.openFile(r.fileId, r.versionId) }, t("download"))))))),
-      h("div", { class: "muted", style: "font-size:12px;margin-top:6px" }, d.current.folderPath),
-      h("h3", null, t("statusLog")),
-      log.length ? h("table", null, h("tbody", null, log.map((l) => h("tr", null,
-        h("td", { class: "date" }, fmtDate(l.at)),
-        h("td", { class: "num" }, l.rev),
-        h("td", null, `${t("st_" + l.from)} → `, h("span", { class: `st s-${slug(l.to)}` }, t("st_" + l.to))),
-        h("td", { class: "soft" }, l.by, l.transmittal ? h("span", { class: "tag", style: "margin-left:6px" }, l.transmittal) : "", l.note ? ` – ${l.note}` : ""))))) : h("div", { class: "muted" }, t("noLog")),
-      h("h3", null, t("transmittals")),
-      trs.length ? h("table", null, h("tbody", null, trs.map((x) => h("tr", null,
-        h("td", { class: "num" }, x.id), h("td", { class: "date" }, fmtDate(x.date)), h("td", null, x.to),
-        h("td", null, x.items.filter((i) => i.key === key).map((i) => i.rev).join(", ")),
-        h("td", null, t("pu_" + x.purpose)))))) : h("div", { class: "muted" }, t("none")),
-      h("h3", null, t("todos")),
-      todos.length ? h("table", null, h("tbody", null, todos.map((x) => h("tr", null,
-        h("td", null, x.title), h("td", { class: isOverdue(x.due, x.state === "Done") ? "date overdue" : "date" }, fmtDate(x.due)), h("td", null, t("todoState_" + x.state)))))) : h("div", { class: "muted" }, t("none")),
-      h("div", { class: "actions" },
-        h("button", { onclick: () => { close(); this.startTransmittal([key]); } }, t("newTransmittal")),
-        h("button", { onclick: () => { close(); this.showTodoForm = true; this.todoPrefillDoc = key; this.go("todos"); } }, t("newTodo"))));
-    document.body.append(bg, dr);
-  }
-  todoPrefillDoc = "";
-
   exportCsv() {
     const esc = (s: unknown) => `"${String(s ?? "").replace(/"/g, '""')}"`;
-    const head = ["Number", "Discipline", "Type", "Revision", "Title", "Status", "Modified", "Modified by", "Folder", "File", "Transmittals"];
-    const lines = [head.join(";")].concat(this.filteredDocs().map((d) => [
-      d.label, d.disc, d.type, d.current.revLabel, d.title, d.status, d.current.modified?.slice(0, 10), d.current.modifiedBy,
-      d.current.folderPath, d.current.name, d.transmittals.join(" "),
+    const head = ["Категория", "Номер", "Част", "Вид", "Ревизия", "Наименование", "Статус", "Издаден", "Потвърдили", "Качен", "Качил", "Папка", "Файл", "Трансмитали"];
+    const lines = [head.join(";")].concat(this.reg.docs.map((d) => [
+      t("kindShort_" + d.kind), d.label, d.disc, d.type, d.current.revLabel, d.title, stLabel(d.status),
+      bgDate(this.issuedAt(d.key, d.current.revLabel)), this.acksOf(d.key, d.current.revLabel).map((a) => a.by).join(", "),
+      d.current.modified?.slice(0, 10), d.current.modifiedBy, d.current.folderPath, d.current.name, d.transmittals.join(" "),
     ].map(esc).join(";")));
     downloadBlob(new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" }), `register_${this.projectCode()}_${today()}.csv`);
   }
 
-  projectCode() {
-    return this.store.tracker.settings.projectCode || mostCommonProject(this.reg.docs) || /^\d{3,5}/.exec(this.host.projectName)?.[0] || "PRJ";
-  }
-
-  // ---------------- Transmittals
-  startTransmittal(keys: string[]) {
-    this.draft = { to: "", attn: "", purpose: "For approval", date: today(), note: "", keys: new Set(keys), filter: "" };
-    this.go("transmittals");
-  }
-
+  // ---------------- Трансмитали
   viewTransmittals(body: HTMLElement) {
-    if (this.draft) body.append(this.transmittalForm());
-    else body.append(h("div", { class: "toolbar" }, h("button", { class: "primary", onclick: () => this.startTransmittal([]) }, "+ " + t("newTransmittal"))));
+    if (this.trForm) body.append(this.transmittalForm());
+    else if (this.canEdit) body.append(h("div", { class: "toolbar" }, h("button", { onclick: () => this.startTransmittal() }, "+ " + t("newTransmittal")),
+      h("span", { class: "muted" }, ` ${t("issue")}: ${t("register")} → ▶`)));
     const list = [...this.store.tracker.transmittals].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     if (!list.length) { body.append(h("div", { class: "empty" }, t("noTransmittals"))); return; }
     body.append(h("div", { class: "tablewrap" }, h("table", null,
       h("thead", null, h("tr", null, h("th", null, "№"), h("th", null, t("date")), h("th", null, t("to")), h("th", null, t("purpose")),
-        h("th", null, t("items")), h("th", { class: "hide-sm" }, t("by")), h("th", null, ""))),
-      h("tbody", null, list.map((x) => h("tr", null,
-        h("td", { class: "key" }, x.id),
-        h("td", { class: "date" }, fmtDate(x.date)),
-        h("td", null, x.to, x.attn ? h("div", { class: "muted" }, x.attn) : ""),
-        h("td", null, h("span", { class: `st s-${slug(statusForPurpose(x.purpose))}` }, t("pu_" + x.purpose))),
-        h("td", null, h("details", null, h("summary", null, `${x.items.length}`),
-          x.items.map((i) => h("div", { class: "mono", style: "font-size:12px" }, `${i.label ?? i.key} ${i.rev}`)))),
-        h("td", { class: "soft hide-sm" }, x.by),
-        h("td", null, x.pdfFileId ? h("button", { class: "link", onclick: () => this.openFile(x.pdfFileId!) }, t("pdf")) :
-          h("button", { class: "link", onclick: () => this.regeneratePdf(x) }, "PDF ↻"))))))));
+        h("th", null, t("items")), h("th", null, t("ackedBy")), h("th", null, ""))),
+      h("tbody", null, list.map((x) => {
+        const todo = x.todoId ? this.todoStates.get(x.todoId) : undefined;
+        const appAcks = x.items.reduce((n, i) => n + this.acksOf(i.key, i.rev).length, 0);
+        return h("tr", null,
+          h("td", { class: "key" }, x.id),
+          h("td", { class: "date" }, fmtDate(x.date)),
+          h("td", null, x.to, x.attn ? h("div", { class: "muted" }, x.attn) : "", h("div", { class: "muted" }, x.by)),
+          h("td", null, h("span", { class: `st s-${slug(statusForPurpose(x.purpose))}` }, t("pu_" + x.purpose))),
+          h("td", null, h("details", null, h("summary", null, `${x.items.length}`),
+            x.items.map((i) => h("div", { class: "mono", style: "font-size:12px" }, `${i.label ?? this.labelOf(i.key)} ${i.rev}`)))),
+          h("td", { class: "soft" },
+            x.todoId ? h("div", null, `${t("ackTodo")} (${x.ackTarget ?? ""}): `, todo ? (todo.closed ? h("b", { class: "okmark" }, `✓ ${t("ackClosed")}${todo.by ? " – " + todo.by : ""}`) : t("ackOpen")) : "…") : "",
+            appAcks ? h("div", null, `✓ ${appAcks}`) : ""),
+          h("td", null,
+            x.pdfFileId ? h("button", { class: "link", onclick: () => this.openFile(x.pdfFileId!) }, t("pdf")) : (this.canEdit ? h("button", { class: "link", onclick: () => this.run(t("saving"), () => this.attachPdf(x)) }, "PDF ↻") : ""),
+            " ", h("button", { class: "link", onclick: () => this.mailDraft(x) }, "✉")));
+      })))));
+  }
+
+  startTransmittal() {
+    this.trForm = { to: "", attn: "", purpose: "For information", date: today(), note: "", keys: new Set(), filter: "" };
+    this.go("transmittals");
   }
 
   transmittalForm() {
-    const dft = this.draft!;
-    const set = (k: "to" | "attn" | "date" | "note" | "purpose") => (e: Event) => { (dft as any)[k] = (e.target as HTMLInputElement).value; if (k === "purpose") this.render(); };
-    const pickBox = h("div", { class: "picker" });
-    const countEl = h("span", { class: "muted" });
-    const drawPicker = () => {
-      const q = dft.filter.toLowerCase();
-      const docs = this.reg.docs.filter((d) => d.status !== "Superseded" && (!q || `${d.label} ${d.title} ${d.current.folderPath}`.toLowerCase().includes(q)));
-      clear(pickBox, h("table", null, h("tbody", null, docs.map((d) => h("tr", { class: "row" + (dft.keys.has(d.key) ? " sel" : ""), onclick: () => { dft.keys.has(d.key) ? dft.keys.delete(d.key) : dft.keys.add(d.key); drawPicker(); } },
-        h("td", { class: "cb" }, h("input", { type: "checkbox", checked: dft.keys.has(d.key) })),
-        h("td", { class: "key" }, d.label), h("td", { class: "num" }, d.current.revLabel), h("td", null, d.title || h("span", { class: "muted" }, d.current.folderPath)),
-        h("td", null, h("span", { class: `st s-${slug(d.status)}` }, t("st_" + d.status))))))));
-      countEl.textContent = `${dft.keys.size} ${t("selected")}`;
+    const f = this.trForm!;
+    const set = (k: "to" | "attn" | "date" | "note" | "purpose") => (e: Event) => { (f as any)[k] = (e.target as HTMLInputElement).value; };
+    const pick = h("div", { class: "picker" });
+    const count = h("span", { class: "muted" });
+    const draw = () => {
+      const q = f.filter.toLowerCase();
+      const docs = this.reg.docs.filter((d) => d.status !== "superseded" && (!q || `${d.label} ${d.title} ${d.current.folderPath}`.toLowerCase().includes(q)));
+      clear(pick, h("table", null, h("tbody", null, docs.map((d) => h("tr", { class: "row" + (f.keys.has(d.key) ? " sel" : ""), onclick: () => { f.keys.has(d.key) ? f.keys.delete(d.key) : f.keys.add(d.key); draw(); } },
+        h("td", { class: "cb" }, h("input", { type: "checkbox", checked: f.keys.has(d.key) })),
+        h("td", { class: "key" }, d.label), h("td", { class: "num" }, d.current.revLabel), h("td", { class: "hide-sm" }, d.title || d.current.folderPath),
+        h("td", null, h("span", { class: `st s-${slug(d.status)}` }, stLabel(d.status))))))));
+      count.textContent = `${f.keys.size} ${t("selected")}`;
     };
-    drawPicker();
-    const target = statusForPurpose(dft.purpose);
+    draw();
     return h("div", { class: "panel" },
-      h("h2", null, t("newTransmittal"), h("span", { class: "mono muted", style: "font-size:13px;margin-left:12px" }, nextTransmittalId(this.store.tracker, this.projectCode()))),
+      h("h2", null, t("newTransmittal"), h("span", { class: "mono muted", style: "font-size:13px;margin-left:10px" }, nextTransmittalId(this.store.tracker, this.projectCode()))),
       h("div", { class: "form" },
-        h("label", null, t("to")), h("input", { value: dft.to, oninput: set("to"), placeholder: "Възложител / Client, ТК, Изпълнител…", list: "recips" }),
-        h("datalist", { id: "recips" }, [...new Set(this.store.tracker.transmittals.map((x) => x.to))].map((r) => h("option", { value: r }))),
-        h("label", null, t("attn")), h("input", { value: dft.attn, oninput: set("attn") }),
-        h("label", null, t("purpose")), h("select", { onchange: set("purpose") }, PURPOSES.map((p) => h("option", { value: p, selected: p === dft.purpose }, t("pu_" + p)))),
-        h("label", null, t("date")), h("input", { type: "date", value: dft.date, oninput: set("date") }),
-        h("label", null, t("note")), h("textarea", { rows: 2, oninput: set("note") }, dft.note),
+        h("label", null, t("to")), h("input", { value: f.to, oninput: set("to"), list: "recips2" }),
+        h("datalist", { id: "recips2" }, [...new Set(this.store.tracker.transmittals.map((x) => x.to))].map((r) => h("option", { value: r }))),
+        h("label", null, t("attn")), h("input", { value: f.attn, oninput: set("attn") }),
+        h("label", null, t("purpose")), h("select", { onchange: set("purpose") }, OTHER_PURPOSES.map((p) => h("option", { value: p, selected: p === f.purpose }, t("pu_" + p)))),
+        h("label", null, t("date")), h("input", { type: "date", value: f.date, oninput: set("date") }),
+        h("label", null, t("note")), h("textarea", { rows: 2, oninput: set("note") }, f.note),
         h("label", null, t("items")),
-        h("div", null, h("div", { class: "toolbar" },
-          h("input", { type: "search", placeholder: t("search"), value: dft.filter, oninput: (e: Event) => { dft.filter = (e.target as HTMLInputElement).value; drawPicker(); } }),
-          countEl), pickBox,
-          h("div", { class: "muted", style: "font-size:12px;margin-top:6px" }, `${t("trWillSet")}: `, h("span", { class: `st s-${slug(target)}` }, t("st_" + target))))),
+        h("div", null, h("div", { class: "toolbar" }, h("input", { type: "search", placeholder: t("search"), value: f.filter, oninput: (e: Event) => { f.filter = (e.target as HTMLInputElement).value; draw(); } }), count), pick)),
       h("div", { class: "actions" },
         h("button", { class: "primary", onclick: () => this.createTransmittal() }, t("create")),
-        h("button", { onclick: () => { this.draft = null; this.render(); } }, t("cancel"))));
+        h("button", { onclick: () => { this.trForm = null; this.render(); } }, t("cancel"))));
   }
 
   async createTransmittal() {
-    const dft = this.draft!;
-    if (!dft.to.trim()) { alert(t("to") + "?"); return; }
-    if (!dft.keys.size) { alert(t("pickDocs")); return; }
+    const f = this.trForm!;
+    if (!f.to.trim()) { alert(t("to") + "?"); return; }
+    if (!f.keys.size) { alert(t("pickDocs")); return; }
     await this.run(t("saving"), async () => {
-      const docs = this.reg.docs.filter((d) => dft.keys.has(d.key));
-      const now = new Date().toISOString();
+      const docs = this.reg.docs.filter((d) => f.keys.has(d.key));
       let created!: Transmittal;
       await this.store.save((tr) => {
         created = {
-          id: nextTransmittalId(tr, this.projectCode()),
-          date: dft.date, to: dft.to.trim(), attn: dft.attn.trim() || undefined, purpose: dft.purpose, note: dft.note.trim() || undefined,
-          by: this.host.user.name, byId: this.host.user.id, createdAt: now,
-          items: docs.map((d) => ({ key: d.key, ...(d.kind === "file" ? { label: d.label } : {}), rev: d.current.revLabel, name: d.current.name, title: d.title, fileId: d.current.fileId, versionId: d.current.versionId })),
+          id: nextTransmittalId(tr, this.projectCode()), date: f.date, to: f.to.trim(), attn: f.attn.trim() || undefined, purpose: f.purpose, note: f.note.trim() || undefined,
+          by: this.host.user.name, byId: this.host.user.id, createdAt: new Date().toISOString(),
+          items: docs.map((d) => ({ key: d.key, ...(d.source === "file" ? { label: d.label } : {}), rev: d.current.revLabel, name: d.current.name, title: d.title || undefined, fileId: d.current.fileId, versionId: d.current.versionId })),
         };
-        return addTransmittal(tr, created, (k, r) => this.statusOf(k, r), this.actor());
+        return addTransmittal(tr, created, this.statusOf, this.actor());
       });
-      this.draft = null;
+      this.trForm = null;
       this.rebuild();
+      await this.attachPdf(created);
       this.toast(`${t("trCreated")}: ${created.id}`);
-      await this.attachPdf(created, true);
     });
   }
 
-  async regeneratePdf(tr: Transmittal) {
-    await this.run(t("saving"), () => this.attachPdf(tr, true));
-  }
-
-  /** Builds the PDF, uploads it to _ArstenDocs/Transmittals/ and stores its file id. */
-  async attachPdf(tr: Transmittal, alsoDownload: boolean) {
+  /** Builds the transmittal PDF, uploads it to _ArstenDocs/Transmittals/ and stores its file id. */
+  async attachPdf(tr: Transmittal) {
     const { transmittalPdf } = await import("./pdf");
     const bytes = await transmittalPdf(tr, this.host.projectName);
-    const blob = new Blob([bytes], { type: "application/pdf" });
-    if (alsoDownload) downloadBlob(blob, `${tr.id}.pdf`);
+    const blob = new Blob([bytes as BlobPart], { type: "application/pdf" });
     try {
       const items = await this.host.api.snapshot();
       this.items = items;
-      const parent = this.store.folderId!;
+      const parent = this.store.folderId ?? (await this.host.api.rootFolderId());
       let folder = items.find((i) => i.tp === "FOLDER" && i.nm === "Transmittals" && i.pid === parent && !i.del)?.id;
       if (!folder) folder = await this.host.api.createFolder("Transmittals", parent);
       const up = await this.host.api.upload(folder, `${tr.id}.pdf`, blob);
       await this.store.save((x) => ({ ...x, transmittals: x.transmittals.map((y) => (y.id === tr.id ? { ...y, pdfFileId: up.fileId } : y)) }));
       this.rebuild();
     } catch (e: any) {
+      downloadBlob(blob, `${tr.id}.pdf`);
       this.error = `PDF upload: ${e?.message ?? e}`;
     }
   }
 
-  // ---------------- Todos
-  viewTodos(body: HTMLElement) {
-    body.append(h("div", { class: "banner" }, this.todos.backend === "native" ? t("todoNative") : t("todoLocal")));
-    if (this.todoError) body.append(h("div", { class: "banner error" }, this.todoError));
-    const f = (k: typeof this.todoFilter, label: string) => h("button", { class: this.todoFilter === k ? "primary" : "", onclick: () => { this.todoFilter = k; this.render(); } }, label);
-    body.append(h("div", { class: "toolbar" }, f("open", t("filterOpen")), f("mine", t("filterMine")), f("overdue", t("filterOverdue")), f("all", t("filterAll")),
-      h("span", { class: "grow" }), h("button", { class: "primary", onclick: () => { this.showTodoForm = !this.showTodoForm; this.render(); } }, "+ " + t("newTodo"))));
-    if (this.showTodoForm) body.append(this.todoForm());
-    const me = this.host.user.id;
-    const list = this.todoList.filter((x) =>
-      this.todoFilter === "all" ? true :
-      this.todoFilter === "open" ? x.state !== "Done" :
-      this.todoFilter === "mine" ? x.assignee?.id === me && x.state !== "Done" :
-      isOverdue(x.due, x.state === "Done"))
-      .sort((a, b) => (a.due ?? "9999").localeCompare(b.due ?? "9999"));
-    if (!list.length) { body.append(h("div", { class: "empty" }, t("noTodos"))); return; }
-    body.append(h("div", { class: "tablewrap" }, h("table", null,
-      h("thead", null, h("tr", null, h("th", null, t("title")), h("th", null, t("document")), h("th", null, t("assignee")), h("th", null, t("due")), h("th", null, t("status")))),
-      h("tbody", null, list.map((x) => h("tr", null,
-        h("td", null, x.label ? h("span", { class: "muted mono" }, `#${x.label} `) : "", x.title, x.description ? h("div", { class: "muted", style: "font-size:12px" }, x.description) : ""),
-        h("td", { class: "key" }, x.docKey ? h("button", { class: "link", onclick: () => { this.tab = "register"; this.render(); this.openDoc(x.docKey!); } }, this.labelOf(x.docKey)) : ""),
-        h("td", null, x.assignee?.name ?? ""),
-        h("td", { class: isOverdue(x.due, x.state === "Done") ? "date overdue" : "date" }, x.due ? fmtDate(x.due) : ""),
-        h("td", null, h("select", { class: "stsel", onchange: (e: Event) => this.setTodoState(x, (e.target as HTMLSelectElement).value as TodoState) },
-          TODO_STATES.map((s) => h("option", { value: s, selected: s === x.state }, t("todoState_" + s)))))))))));
+  // ---------------- Въпроси (RFI)
+  startRfi(keys: string[]) {
+    const def = this.store.tracker.settings.rfiAssignee;
+    this.rfiForm = { title: "", question: "", docs: new Set(keys), location: "", due: addDays(today(), 5), assignee: def ? `${def.type}:${def.id}` : "", filter: "" };
+    this.rfiOpen = "";
+    this.go("rfis");
   }
 
-  todoForm() {
-    const v = { title: "", description: "", assignee: "", due: "", doc: this.todoPrefillDoc };
-    this.todoPrefillDoc = "";
-    const set = (k: keyof typeof v) => (e: Event) => { v[k] = (e.target as HTMLInputElement).value; };
+  viewRfis(body: HTMLElement) {
+    if (this.rfiForm) body.append(this.rfiFormPanel());
+    else body.append(h("div", { class: "toolbar" },
+      this.canEdit ? h("button", { class: "primary", onclick: () => this.startRfi([]) }, "+ " + t("newRfi")) : "",
+      h("button", { class: this.rfiFilter === "open" ? "chip on" : "chip", onclick: () => { this.rfiFilter = "open"; this.render(); } }, t("rfiState_open")),
+      h("button", { class: this.rfiFilter === "all" ? "chip on" : "chip", onclick: () => { this.rfiFilter = "all"; this.render(); } }, t("all"))));
+    const list = this.store.tracker.rfis.filter((r) => this.rfiFilter === "all" || r.state !== "closed").slice().sort((a, b) => b.askedAt.localeCompare(a.askedAt));
+    if (!list.length) { body.append(h("div", { class: "empty" }, t("rfiNone"))); return; }
+    body.append(h("div", { class: "hint" }, t("rfiNotInstruction")));
+    body.append(h("div", { class: "rfilist" }, list.map((r) => this.rfiCard(r))));
+  }
+
+  rfiCard(r: Rfi) {
+    const open = this.rfiOpen === r.id;
+    const late = r.state === "open" && isOverdue(r.due, false);
+    const ball = r.state === "open" ? r.assignee?.name ?? "—" : r.state === "answered" ? r.askedBy : "—";
+    const head = h("div", { class: "rfihead", onclick: () => { this.rfiOpen = open ? "" : r.id; this.render(); } },
+      h("span", { class: "key" }, r.id), h("b", null, r.title),
+      h("span", { class: `st rfi-${r.state}` }, t("rfiState_" + r.state)),
+      h("span", { class: late ? "date overdue" : "date" }, r.due ? `${t("rfiDue")} ${bgDate(r.due)}` : ""),
+      h("span", { class: "muted" }, `${t("rfiBall")}: ${ball}`));
+    if (!open) return h("div", { class: "rficard" }, head);
+    const answer = h("textarea", { rows: 3, placeholder: t("rfiAnswer") }) as HTMLTextAreaElement;
+    let outcome: Rfi["outcome"] = "none";
+    return h("div", { class: "rficard open" }, head,
+      h("div", { class: "rfibody" },
+        h("div", { class: "q" }, r.question),
+        h("div", { class: "muted" }, `${t("rfiAsked")}: ${r.askedBy} · ${bgDate(r.askedAt)}`, r.location ? ` · ${r.location}` : "", r.todoId ? ` · ToDo` : ""),
+        r.docs.length ? h("div", null, `${t("rfiDocs")}: `, r.docs.map((k) => h("button", { class: "link", onclick: () => { this.tab = "register"; const d = this.doc(k); if (d) this.kind = d.kind; this.openKey = k; this.render(); } }, this.labelOf(k) + " "))) : "",
+        r.answer ? h("div", { class: "a" }, h("b", null, `${t("rfiAnswer")} (${r.answeredBy}, ${bgDate(r.answeredAt)}): `), r.answer,
+          r.outcome ? h("div", { class: "muted" }, `${t("rfiOutcome")}: ${t("out_" + r.outcome)}`) : "") : "",
+        r.state === "open" && can.answer(this.access.role) ? h("div", null, answer,
+          h("div", { class: "actions wrap" },
+            h("select", { onchange: (e: Event) => { outcome = (e.target as HTMLSelectElement).value as Rfi["outcome"]; } },
+              (["none", "order", "revision"] as const).map((o) => h("option", { value: o }, t("out_" + o)))),
+            h("button", { class: "primary", onclick: () => { if (!answer.value.trim()) return; this.run(t("saving"), async () => { await answerRfi(this.ctx, r.id, answer.value, outcome); }); } }, t("rfiAnswerBtn")))) : "",
+        r.state !== "closed" && this.canEdit ? h("div", { class: "actions" }, h("button", { onclick: () => this.run(t("saving"), async () => { await closeRfi(this.ctx, r.id); }) }, t("rfiClose"))) : ""));
+  }
+
+  rfiFormPanel() {
+    const f = this.rfiForm!;
+    const set = (k: "title" | "question" | "location" | "due" | "assignee") => (e: Event) => { (f as any)[k] = (e.target as HTMLInputElement).value; };
+    const pick = h("div", { class: "picker small" });
+    const draw = () => {
+      const q = f.filter.toLowerCase();
+      const docs = this.reg.docs.filter((d) => f.docs.has(d.key) || (q && `${d.label} ${d.title}`.toLowerCase().includes(q))).slice(0, 40);
+      clear(pick, h("table", null, h("tbody", null, docs.map((d) => h("tr", { class: "row" + (f.docs.has(d.key) ? " sel" : ""), onclick: () => { f.docs.has(d.key) ? f.docs.delete(d.key) : f.docs.add(d.key); draw(); } },
+        h("td", { class: "cb" }, h("input", { type: "checkbox", checked: f.docs.has(d.key) })), h("td", { class: "key" }, d.label), h("td", { class: "num" }, d.current.revLabel))))));
+    };
+    draw();
     return h("div", { class: "panel" },
-      h("h2", null, t("newTodo")),
+      h("h2", null, t("newRfi")),
       h("div", { class: "form" },
-        h("label", null, t("title")), h("input", { oninput: set("title") }),
-        h("label", null, t("assignee")), h("select", { onchange: set("assignee") }, h("option", { value: "" }, "—"), this.users.map((u) => h("option", { value: u.id }, u.name))),
-        h("label", null, t("due")), h("input", { type: "date", oninput: set("due") }),
-        h("label", null, t("document")), h("select", { onchange: set("doc") }, h("option", { value: "" }, "—"),
-          this.reg.docs.map((d) => h("option", { value: d.key, selected: d.key === v.doc }, `${d.label} ${d.title}`))),
-        h("label", null, t("description")), h("textarea", { rows: 2, oninput: set("description") })),
+        h("label", null, t("title")), h("input", { value: f.title, oninput: set("title") }),
+        h("label", null, t("rfiQuestion")), h("textarea", { rows: 4, oninput: set("question") }, f.question),
+        h("label", null, t("rfiDocs")), h("div", null, h("input", { type: "search", placeholder: t("search"), value: f.filter, oninput: (e: Event) => { f.filter = (e.target as HTMLInputElement).value; draw(); } }), pick),
+        h("label", null, t("rfiLocation")), h("input", { value: f.location, oninput: set("location") }),
+        h("label", null, t("rfiAssignee")), this.assigneeSelect(f.assignee, (v) => { f.assignee = v; }),
+        h("label", null, t("rfiDue")), h("input", { type: "date", value: f.due, oninput: set("due") })),
       h("div", { class: "actions" },
-        h("button", { class: "primary", onclick: async () => {
-          if (!v.title.trim()) return;
-          await this.run(t("saving"), async () => {
-            await this.todos.create({ title: v.title.trim(), description: v.description.trim() || undefined, due: v.due || undefined, docKey: v.doc || undefined, assignee: this.users.find((u) => u.id === v.assignee) });
-            this.showTodoForm = false;
-            await this.loadTodos();
-          });
-        } }, t("create")),
-        h("button", { onclick: () => { this.showTodoForm = false; this.render(); } }, t("cancel"))));
+        h("button", { class: "primary", onclick: () => this.saveRfi() }, t("create")),
+        h("button", { onclick: () => { this.rfiForm = null; this.render(); } }, t("cancel"))));
   }
 
-  async setTodoState(x: TodoView, s: TodoState) {
-    await this.run(t("saving"), async () => { await this.todos.setState(x, s); await this.loadTodos(); });
+  assigneeSelect(value: string, onChange: (v: string) => void) {
+    const all = this.assignees();
+    return h("select", { onchange: (e: Event) => onChange((e.target as HTMLSelectElement).value) },
+      h("option", { value: "" }, t("nobody")),
+      h("optgroup", { label: "Групи / Groups" }, all.filter((a) => a.type === "GROUP").map((a) => h("option", { value: `GROUP:${a.id}`, selected: value === `GROUP:${a.id}` }, a.name))),
+      h("optgroup", { label: "Хора / People" }, all.filter((a) => a.type === "USER").map((a) => h("option", { value: `USER:${a.id}`, selected: value === `USER:${a.id}` }, a.name))));
+  }
+  parseAssignee(v: string): Assignee | undefined {
+    if (!v) return undefined;
+    const [type, id] = v.split(":");
+    return this.assignees().find((a) => a.type === type && a.id === id);
   }
 
-  // ---------------- Settings
+  async saveRfi() {
+    const f = this.rfiForm!;
+    if (!f.title.trim() || !f.question.trim()) { alert(`${t("title")} / ${t("rfiQuestion")}?`); return; }
+    await this.run(t("saving"), async () => {
+      const { rfi, warning } = await createRfi(this.ctx, { title: f.title, question: f.question, docs: [...f.docs], location: f.location, due: f.due || undefined, assignee: this.parseAssignee(f.assignee) }, this.labelOf);
+      this.rfiForm = null;
+      this.rfiOpen = rfi.id;
+      if (warning) this.error = warning;
+      this.toast(rfi.id);
+    });
+  }
+
+  // ---------------- Настройки
   viewSettings(body: HTMLElement) {
     const st = this.store.tracker.settings;
-    const v = { pattern: st.pattern || DEFAULT_PATTERN, trackExts: st.trackExts ?? "", projectCode: st.projectCode ?? "", todoBackend: st.todoBackend ?? "" };
+    const v = {
+      pattern: st.pattern || DEFAULT_PATTERN, trackExts: st.trackExts ?? "", projectCode: st.projectCode ?? "", siteFolder: st.siteFolder ?? DEFAULT_SITE_FOLDER,
+      ack: st.ackAssignee ? `${st.ackAssignee.type}:${st.ackAssignee.id}` : "", rfi: st.rfiAssignee ? `${st.rfiAssignee.type}:${st.rfiAssignee.id}` : "",
+    };
     const testOut = h("div", { class: "mono soft", style: "font-size:12px" });
-    let testName = "1018-ST-DR-0101_R02_Фундаменти.pdf";
+    let testName = "1028-ST-DR-0101_R02_Фундаменти.pdf";
     const runTest = () => {
       try {
         const p = parseName(testName, compilePattern(v.pattern));
@@ -575,43 +976,42 @@ class App {
     };
     runTest();
     const diag = h("div");
+    const inp = (k: keyof typeof v, extra: Record<string, any> = {}) => h("input", { value: v[k], oninput: (e: Event) => { (v as any)[k] = (e.target as HTMLInputElement).value; if (k === "pattern") runTest(); }, ...extra });
+    const editable = this.canEdit;
     body.append(h("div", { class: "panel" },
       h("h2", null, t("settings")),
+      h("div", { class: "metagrid" }, h("span", null, t("role")), h("b", null, t("role_" + this.access.role), this.access.groups.length ? ` (${this.access.groups.join(", ")})` : "")),
       h("div", { class: "form" },
-        h("label", null, t("pattern")), h("div", null, h("input", { value: v.pattern, style: "width:100%", class: "mono", oninput: (e: Event) => { v.pattern = (e.target as HTMLInputElement).value; runTest(); } }),
-          h("div", { class: "muted", style: "font-size:12px" }, t("patternHelp"))),
+        h("label", null, t("siteFolder")), h("div", null, inp("siteFolder", { style: "width:100%" }), h("div", { class: "muted small" }, t("siteFolderHelp"))),
+        h("label", null, t("ackAssignee")), this.assigneeSelect(v.ack, (x) => { v.ack = x; }),
+        h("label", null, t("rfiAssigneeSet")), this.assigneeSelect(v.rfi, (x) => { v.rfi = x; }),
+        h("label", null, t("trackExts")), h("div", null, inp("trackExts", { placeholder: "pdf" }), h("div", { class: "muted small" }, t("trackExtsHelp"))),
+        h("label", null, t("pattern")), h("div", null, inp("pattern", { style: "width:100%", class: "mono" }), h("div", { class: "muted small" }, t("patternHelp"))),
         h("label", null, t("testName")), h("div", null, h("input", { value: testName, style: "width:100%", oninput: (e: Event) => { testName = (e.target as HTMLInputElement).value; runTest(); } }), testOut),
-        h("label", null, t("trackExts")), h("div", null, h("input", { value: v.trackExts, placeholder: "pdf", oninput: (e: Event) => { v.trackExts = (e.target as HTMLInputElement).value.trim(); } }),
-          h("div", { class: "muted", style: "font-size:12px" }, t("trackExtsHelp"))),
-        h("label", null, t("projectCode")), h("input", { value: v.projectCode, placeholder: mostCommonProject(this.reg.docs) ?? "", oninput: (e: Event) => { v.projectCode = (e.target as HTMLInputElement).value.trim(); } }),
-        h("label", null, t("todoBackend")), h("select", { onchange: (e: Event) => { v.todoBackend = (e.target as HTMLSelectElement).value; } },
-          h("option", { value: "", selected: !v.todoBackend }, t("auto")),
-          h("option", { value: "native", selected: v.todoBackend === "native" }, "Trimble Connect ToDo"),
-          h("option", { value: "local", selected: v.todoBackend === "local" }, "tracker.json")),
+        h("label", null, t("projectCode")), inp("projectCode", { placeholder: this.projectCode() }),
         h("label", null, t("trackerFile")), h("div", { class: "soft" }, this.store.fileId
           ? h("span", null, `_ArstenDocs/tracker.json · ${this.store.versionId ?? ""} `, h("button", { class: "link", onclick: () => this.openFile(this.store.fileId!) }, t("download")))
           : t("notCreated"))),
-      h("div", { class: "actions" }, h("button", { class: "primary", onclick: async () => {
+      editable ? h("div", { class: "actions" }, h("button", { class: "primary", onclick: async () => {
         try { compilePattern(v.pattern); } catch { alert("Invalid pattern"); return; }
         await this.run(t("saving"), async () => {
-          await this.store.save((tr) => ({ ...tr, settings: { ...tr.settings, pattern: v.pattern, trackExts: v.trackExts, projectCode: v.projectCode || undefined, todoBackend: (v.todoBackend || undefined) as any } }));
+          await this.store.save((tr) => ({ ...tr, settings: { ...tr.settings, pattern: v.pattern, trackExts: v.trackExts.trim(), projectCode: v.projectCode.trim() || undefined,
+            siteFolder: v.siteFolder.trim() || DEFAULT_SITE_FOLDER, ackAssignee: this.parseAssignee(v.ack), rfiAssignee: this.parseAssignee(v.rfi) } }));
           this.rebuild();
-          await this.todos.detect();
-          await this.loadTodos();
           this.toast(t("saved"));
         });
-      } }, t("save")))),
+      } }, t("save"))) : ""),
       h("div", { class: "panel" },
         h("h2", null, t("diagnostics")),
-        h("div", { class: "soft", style: "margin-bottom:8px" }, `mode: ${this.host.api.mode} · project ${this.host.projectId} · user ${this.host.user.name}`),
+        h("div", { class: "soft", style: "margin-bottom:8px" }, `mode: ${this.host.api.mode} · project ${this.host.projectId} · ${this.host.user.name}`),
         h("button", { onclick: async () => {
           clear(diag, h("div", { class: "muted" }, t("loading")));
           const res = await this.host.api.probe();
           clear(diag, h("table", null, h("tbody", null, res.map((r) => h("tr", null,
             h("td", null, r.ok ? "✓" : "✗"), h("td", null, r.name), h("td", { class: r.ok ? "soft" : "overdue" }, r.status), h("td", { class: "date" }, `${r.ms} ms`))))));
-          console.table(res);
         } }, t("runDiagnostics")), diag));
   }
 }
 
+void ALL_STATUSES;
 new App().start();

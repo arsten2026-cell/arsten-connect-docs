@@ -11,8 +11,11 @@
   --accent: #e37424;
   --hover: #f3f1ed;
   --warn: #b3261e;
+  --ok: #1e7a3c;
+  --info: #3b6ea8;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; background: var(--bg); color: var(--ink); }
 body { font-family: "Ubuntu", system-ui, sans-serif; font-weight: 300; font-size: 14px; line-height: 1.5; }
 ::selection { background: var(--accent); color: #fff; }
@@ -82,11 +85,17 @@ td.cb, th.cb { width: 28px; }
 /* Status pill: square marker + text, no fills */
 .st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; }
 .st::before { content: ""; width: 8px; height: 8px; border: 1px solid var(--ink-soft); display: inline-block; }
-.st.s-Draft::before { border-color: var(--ink-faint); }
-.st.s-For-approval::before { border-color: var(--accent); background: linear-gradient(135deg, var(--accent) 50%, transparent 50%); }
-.st.s-Issued::before { background: var(--accent); border-color: var(--accent); }
-.st.s-Superseded { color: var(--ink-faint); text-decoration: line-through; }
-.st.s-Superseded::before { border-color: var(--line-soft); }
+.st.s-received::before, .st.s-draft::before, .st.s-submitted::before { border-color: var(--ink-faint); }
+.st.s-review::before, .st.s-returned::before { border-color: var(--accent); background: linear-gradient(135deg, var(--accent) 50%, transparent 50%); }
+.st.s-construction { color: var(--ok); font-weight: 500; }
+.st.s-construction::before { background: var(--ok); border-color: var(--ok); }
+.st.s-signed::before, .st.s-asbuilt::before { background: var(--accent); border-color: var(--accent); }
+.st.s-info::before { border-color: var(--info); background: var(--info); opacity: .6; }
+.st.s-A::before, .st.s-B::before { background: var(--ok); border-color: var(--ok); }
+.st.s-C::before { background: var(--accent); border-color: var(--accent); }
+.st.s-D::before { background: var(--warn); border-color: var(--warn); }
+.st.s-superseded, .st.s-void { color: var(--ink-faint); text-decoration: line-through; }
+.st.s-superseded::before, .st.s-void::before { border-color: var(--line-soft); }
 select.stsel { padding: 2px 4px; font-size: 13px; border-color: transparent; background: transparent; }
 select.stsel:hover { border-color: var(--line-soft); background: #fff; }
 .tag { font-family: "Ubuntu Mono", monospace; font-size: 12px; color: var(--ink-soft); border: 1px solid var(--line); padding: 0 5px; margin-right: 4px; white-space: nowrap; }
@@ -118,7 +127,87 @@ details.unnum summary { cursor: pointer; color: var(--ink-soft); }
 footer.foot { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 10px; display: flex; gap: 10px; align-items: center; font-size: 12px; color: var(--ink-muted); }
 footer.foot::before { content: ""; width: 8px; height: 8px; background: var(--accent); display: inline-block; }
 
+/* ---- v2: GC doc control ---- */
+.badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 6px; background: var(--accent); color: #fff; font-size: 11px; line-height: 18px; text-align: center; font-weight: 500; }
+.banner.ok { border-left-color: var(--ok); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+.chips.small .chip { font-size: 12px; padding: 3px 9px; }
+.chip { border: 1px solid var(--line-soft); background: #fff; padding: 5px 12px; font-weight: 400; }
+.chip.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+.actions-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; background: #fff; border: 1px solid var(--accent); margin-bottom: 10px; position: sticky; top: 0; z-index: 5; }
+.actions-bar select { padding: 4px 6px; }
+button.small { font-size: 12px; padding: 2px 8px; }
+button.danger { border-color: var(--warn); color: var(--warn); }
+.currentbox { background: #fff; border: 1px solid var(--line); padding: 12px 14px; margin-bottom: 14px; }
+.currentbox label { display: block; font-size: 13px; color: var(--ink-soft); margin-bottom: 6px; font-weight: 400; }
+input.big { width: 100%; font-size: 17px; padding: 8px 10px; }
+.current-out .cur { margin-top: 8px; padding: 8px 10px; cursor: pointer; font-size: 14px; border-left: 4px solid; }
+.cur.yes { border-color: var(--ok); background: #eef7f0; }
+.cur.yes b:first-child { color: var(--ok); }
+.cur.no { border-color: var(--warn); background: #fbeeed; }
+.cur.no b:first-child { color: var(--warn); }
+.revbig { font-family: "Ubuntu Mono", monospace; font-weight: 700; font-size: 15px; }
+.sitemark { color: var(--ok); }
+.okmark { color: var(--ok); font-weight: 500; }
+tr.fresh td { background: #fff8f2; }
+tr.fresh td.key { box-shadow: inset 3px 0 0 var(--accent); }
+.hint { font-size: 13px; color: var(--ink-soft); margin: 0 0 12px; }
+.explain { background: #fff; border: 1px solid var(--line); padding: 10px 14px; margin: 12px 0; font-size: 13px; }
+.explain ol { margin: 6px 0 0 18px; padding: 0; }
+.metagrid { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; font-size: 13px; margin-bottom: 6px; }
+.metagrid > span { color: var(--ink-muted); }
+.form.tight { grid-template-columns: 150px 1fr; gap: 6px 10px; }
+.bigstatus { margin: 10px 0; font-size: 16px; }
+.bigstatus .st { font-size: 15px; }
+.actions.wrap { flex-wrap: wrap; }
+.dec { font-weight: 500; }
+.dec-A, .dec-B { border-color: var(--ok); color: var(--ok); }
+.dec-C { border-color: var(--accent); color: var(--accent); }
+.dec-D { border-color: var(--warn); color: var(--warn); }
+.link-row { cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+.small, .muted.small { font-size: 12px; }
+.picker.small { max-height: 160px; margin-top: 6px; }
+.rfilist { display: flex; flex-direction: column; gap: 6px; }
+.rficard { background: #fff; border: 1px solid var(--line); }
+.rficard.open { border-color: var(--ink); }
+.rfihead { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 8px 12px; cursor: pointer; }
+.rfihead .key { font-family: "Ubuntu Mono", monospace; font-weight: 500; }
+.rfibody { padding: 0 12px 12px; border-top: 1px solid var(--line); }
+.rfibody .q { white-space: pre-wrap; margin: 10px 0 6px; font-size: 14px; }
+.rfibody .a { white-space: pre-wrap; margin: 10px 0; padding: 8px 10px; background: #eef7f0; border-left: 3px solid var(--ok); }
+.rfibody textarea { width: 100%; margin-top: 8px; }
+.st.rfi-open::before { border-color: var(--accent); background: var(--accent); }
+.st.rfi-answered::before { background: var(--ok); border-color: var(--ok); }
+.st.rfi-closed { color: var(--ink-faint); }
+
+/* Inside the Arsten / MULTIPLAN 3D-viewer panel (narrow) */
+body.in-shell .shell { padding: 8px 10px 30px; }
+body.in-shell header.top .logo, body.in-shell header.top .proj .mono { display: none; }
+body.in-shell header.top { padding-bottom: 6px; gap: 10px; }
+body.in-shell header.top .proj h1 { font-size: 15px; font-weight: 400; }
+body.in-shell nav.tabs { gap: 14px; margin-bottom: 10px; }
+body.in-shell nav.tabs button { font-size: 13px; padding: 8px 0 6px; }
+body.in-shell .drawer { width: 100%; padding: 14px 14px 30px; }
+body.in-shell footer.foot { margin-top: 20px; }
+body.in-shell .chip { font-size: 12px; padding: 3px 8px; }
+body.in-shell .stats .stat .n { font-size: 20px; }
+body.in-shell input.big { font-size: 15px; }
+
+@media (max-width: 560px) {
+  td.key { white-space: normal; word-break: break-word; font-size: 12.5px; }
+  td, th { padding: 5px 4px; }
+  .hide-xs { display: none; }
+  .chip { font-size: 12px; padding: 3px 8px; }
+  .toolbar input[type=search] { min-width: 0; flex: 1 1 140px; }
+  .drawer { width: 100%; padding: 14px 14px 30px; }
+  .actions-bar > * { flex: 0 0 auto; }
+}
+
 @media (max-width: 700px) {
+  .metagrid, .form.tight { grid-template-columns: 1fr; }
+  .stat { padding: 6px 12px 6px 0; margin-right: 12px; }
+  .stat .n { font-size: 20px; }
+  .actions-bar { font-size: 12px; }
   .shell { padding: 12px 16px 40px; }
   header.top { flex-wrap: wrap; }
   .form { grid-template-columns: 1fr; }

@@ -7,6 +7,8 @@ export interface Host {
   inConnect: boolean;
   projectId: string;
   projectName: string;
+  location: string;
+  inShell: boolean;
   user: { id?: string; name: string; email?: string };
   language?: string;
   /** Left-navigation sub menu → our tabs */
@@ -60,13 +62,16 @@ export async function connectHost(): Promise<Host> {
     inConnect: true,
     projectId: project.id,
     projectName: project.name ?? project.id,
+    location: project.location ?? "europe",
+    inShell: params.has("shell"),
     user: { id: u?.id, name: [u?.firstName, u?.lastName].filter(Boolean).join(" ") || u?.email || "?", email: u?.email },
     language: settings?.language ?? u?.language,
     onCommand: (cb) => commandHandlers.push(cb),
     setMenu: async (items) => {
+      if (params.has("shell")) return; // inside the Arsten / MULTIPLAN panel: the shell owns the menu
       try {
         await ws.ui.setMenu({
-          title: "Arsten Docs",
+          title: "Документи",
           icon: new URL("icon.png", location.href).href,
           command: items[0]?.command ?? "register",
           subMenus: items.map((i) => ({ title: i.title, command: i.command })),
@@ -84,7 +89,9 @@ function mockHost(nativeTodos: boolean): Host {
     api,
     inConnect: false,
     projectId: api.projectId,
-    projectName: "1018 · Жилищна сграда Пловдив (demo)",
+    projectName: "1028 - Retail Tsarevo (demo)",
+    location: "europe",
+    inShell: new URLSearchParams(location.search).has("shell"),
     user: { id: "u1", name: "Найден Кочев", email: "nkochev@arsten-bg.com" },
     onCommand: () => {},
     setMenu: async () => {},

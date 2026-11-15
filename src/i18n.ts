@@ -146,6 +146,7 @@ const dict = {
   rfiNone: ["Няма въпроси.", "No RFIs."],
   rfiAnswerBtn: ["Отговори", "Answer"],
   rfiClose: ["Затвори въпроса", "Close RFI"],
+  rfiMakeTodo: ["Създай задача в Connect", "Create Connect ToDo"],
   rfiOutcome: ["Резултат", "Outcome"],
   out_none: ["Без промяна", "No change"],
   out_order: ["Заповед в заповедната книга", "Site instruction book entry"],

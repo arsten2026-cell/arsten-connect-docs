@@ -255,7 +255,14 @@ export async function createRfi(ctx: OpsContext, inp: RfiInput, labelOf: (key: s
     };
     return { ...t, rfis: [...t.rfis, rfi] };
   });
-  let warning: string | undefined;
+  const warning = await ensureRfiTodo(ctx, rfi.id, labelOf);
+  return { rfi: ctx.store.tracker.rfis.find((x) => x.id === rfi.id) ?? rfi, warning };
+}
+
+/** Creates the Connect ToDo of an RFI if it has none yet (also the "retry" when Connect refused it the first time). */
+export async function ensureRfiTodo(ctx: OpsContext, id: string, labelOf: (key: string) => string): Promise<string | undefined> {
+  const rfi = ctx.store.tracker.rfis.find((x) => x.id === id);
+  if (!rfi || rfi.todoId) return undefined;
   try {
     const todo = await ctx.api.createTodo({
       title: `${rfi.id}: ${rfi.title}`,
@@ -263,19 +270,18 @@ export async function createRfi(ctx: OpsContext, inp: RfiInput, labelOf: (key: s
         rfi.question,
         rfi.docs.length ? "Документи: " + rfi.docs.map(labelOf).join(", ") : "",
         rfi.location ? "Място: " + rfi.location : "",
-        `Зададен от ${actor.name}. Отговорете в „Документи“ (Arsten / MULTIPLAN) или в коментар тук.`,
+        `Зададен от ${rfi.askedBy}. Отговорете в „Документи“ (Arsten / MULTIPLAN) или в коментар тук.`,
         `[rfi:${rfi.id}]`,
       ].filter(Boolean).join("\n"),
       dueDate: rfi.due ? new Date(rfi.due + "T12:00:00Z").toISOString() : undefined,
       assignees: rfi.assignee ? [{ id: rfi.assignee.id, type: rfi.assignee.type }] : undefined,
       type: "Request",
     });
-    if (todo?.id) await ctx.store.save((t) => ({ ...t, rfis: t.rfis.map((x) => (x.id === rfi.id ? { ...x, todoId: todo.id } : x)) }));
-    rfi = ctx.store.tracker.rfis.find((x) => x.id === rfi.id) ?? rfi;
+    if (todo?.id) await ctx.store.save((t) => ({ ...t, rfis: t.rfis.map((x) => (x.id === id ? { ...x, todoId: todo.id } : x)) }));
+    return undefined;
   } catch (e: any) {
-    warning = `Задачата в Connect не беше създадена (${e?.message ?? e}); въпросът е записан само тук.`;
+    return `Задачата в Connect не беше създадена (${e?.message ?? e}); въпросът е записан само тук.`;
   }
-  return { rfi, warning };
 }
 
 export async function answerRfi(ctx: OpsContext, id: string, answer: string, outcome: Rfi["outcome"]) {

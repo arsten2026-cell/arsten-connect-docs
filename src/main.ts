@@ -12,7 +12,7 @@ import { clear, downloadBlob, fmtDate, h, today } from "./dom";
 import type { GroupRef } from "./api";
 import { loadAccess, can, type Access } from "./roles";
 import {
-  issueForConstruction, createRfi, answerRfi, closeRfi, decideSubmittal, withdrawFromSite, ackTodoStates, folderUrl, sitePath,
+  issueForConstruction, createRfi, ensureRfiTodo, answerRfi, closeRfi, decideSubmittal, withdrawFromSite, ackTodoStates, folderUrl, sitePath,
   type OpsContext, type IssueResult,
 } from "./ops";
 
@@ -930,7 +930,9 @@ class App {
             h("select", { onchange: (e: Event) => { outcome = (e.target as HTMLSelectElement).value as Rfi["outcome"]; } },
               (["none", "order", "revision"] as const).map((o) => h("option", { value: o }, t("out_" + o)))),
             h("button", { class: "primary", onclick: () => { if (!answer.value.trim()) return; this.run(t("saving"), async () => { await answerRfi(this.ctx, r.id, answer.value, outcome); }); } }, t("rfiAnswerBtn")))) : "",
-        r.state !== "closed" && this.canEdit ? h("div", { class: "actions" }, h("button", { onclick: () => this.run(t("saving"), async () => { await closeRfi(this.ctx, r.id); }) }, t("rfiClose"))) : ""));
+        r.state !== "closed" && this.canEdit ? h("div", { class: "actions" },
+          h("button", { onclick: () => this.run(t("saving"), async () => { await closeRfi(this.ctx, r.id); }) }, t("rfiClose")),
+          !r.todoId ? h("button", { onclick: () => this.run(t("saving"), async () => { const w = await ensureRfiTodo(this.ctx, r.id, this.labelOf); if (w) this.error = w; else this.toast("ToDo ✓"); }) }, t("rfiMakeTodo")) : "") : ""));
   }
 
   rfiFormPanel() {

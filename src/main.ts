@@ -393,7 +393,7 @@ class App {
         h("select", { onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value as DocStatus; if (v) this.bulkStatus(docs, v); } },
           h("option", { value: "" }, t("setStatus") + "…"), STATUS_BY_KIND[this.kind].filter((s) => !["A", "B", "C", "D", "superseded", "construction"].includes(s)).map((s) => h("option", { value: s }, stLabel(s)))),
         h("select", { onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value as Kind; if (v) this.bulkKind(docs, v); } },
-          h("option", { value: "" }, t("setKind") + "…"), KINDS.filter((k) => k !== this.kind).map((k) => h("option", { value: k }, "→ " + t("kind_" + k)))),
+          h("option", { value: "" }, t("setKind") + "…"), KINDS.filter((k) => k !== this.kind).map((k) => h("option", { value: k }, t("kind_" + k)))),
         h("button", { onclick: () => this.startRfi(docs.map((d) => d.key)) }, t("newRfi")),
         h("button", { class: "link", onclick: () => { this.sel.clear(); draw(); } }, "×"));
     };

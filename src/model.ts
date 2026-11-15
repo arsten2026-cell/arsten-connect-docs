@@ -380,7 +380,11 @@ export function buildRegister(items: SnapshotItem[], tracker: Tracker, users: Ma
 // ---------- Mutations (pure) ----------
 export interface Actor { name: string; id?: string }
 
-export function setStatus(t: Tracker, key: string, rev: string, to: DocStatus, from: DocStatus, actor: Actor, note?: string, transmittal?: string, at = new Date().toISOString()): Tracker {
+/** The stored status in THIS tracker (fresh after a conflict retry), else the status the screen showed. */
+export const statusIn = (t: Tracker, key: string, rev: string, fallback: DocStatus): DocStatus => t.status[revId(key, rev)] ?? fallback;
+
+export function setStatus(t: Tracker, key: string, rev: string, to: DocStatus, shown: DocStatus, actor: Actor, note?: string, transmittal?: string, at = new Date().toISOString()): Tracker {
+  const from = statusIn(t, key, rev, shown);
   if (from === to && t.status[revId(key, rev)] === to) return t;
   return {
     ...t,
@@ -418,15 +422,26 @@ export const nextTransmittalId = (t: Tracker, code: string) => nextSeq(t.transmi
 export const nextRfiId = (t: Tracker, code: string) => nextSeq(t.rfis.map((x) => x.id), `RFI-${code}-`);
 export const nextPackageId = (t: Tracker, code: string) => nextSeq(t.packages.map((x) => x.id), `ПК-${code}-`);
 
-/** Adds a transmittal and moves every included revision to the status implied by its purpose (never downgrades). */
-export function addTransmittal(t: Tracker, tr: Transmittal, currentStatus: (key: string, rev: string) => DocStatus, actor: Actor): Tracker {
-  let next: Tracker = { ...t, transmittals: [...t.transmittals, tr] };
+/** Adds a transmittal and moves the included revisions to the status implied by its purpose. Never downgrades an issued
+ *  revision, never overwrites a designer's A/B/C/D decision, and only sets statuses that exist for the document's kind. */
+export function addTransmittal(t: Tracker, tr: Transmittal, currentStatus: (key: string, rev: string) => DocStatus, actor: Actor, setStatuses = true): Tracker {
+  let next: Tracker = { ...t, transmittals: [...t.transmittals.filter((x) => x.id !== tr.id), tr] };
+  if (!setStatuses) return next;
+  return applyPurpose(next, tr, tr.items.map((i) => i.key), currentStatus, actor);
+}
+
+export function applyPurpose(t: Tracker, tr: Transmittal, keys: string[], currentStatus: (key: string, rev: string) => DocStatus, actor: Actor): Tracker {
+  let next = t;
   const to = statusForPurpose(tr.purpose);
   for (const it of tr.items) {
-    const from = currentStatus(it.key, it.rev);
+    if (!keys.includes(it.key)) continue;
+    const kind = next.meta[it.key]?.kind ?? "design";
+    if (!STATUS_BY_KIND[kind].includes(to)) continue;
+    const from = statusIn(next, it.key, it.rev, currentStatus(it.key, it.rev));
     if (from === to) continue;
     if (SUPERSEDING.includes(from) && !SUPERSEDING.includes(to)) continue; // an issued revision stays issued
     if (from === "superseded") continue;
+    if (["A", "B", "C", "D"].includes(from) && to !== "construction") continue; // keep the designer's decision
     next = setStatus(next, it.key, it.rev, to, from, actor, undefined, tr.id, tr.createdAt);
   }
   return next;
@@ -439,9 +454,11 @@ export function addAck(t: Tracker, key: string, rev: string, a: Ack): Tracker {
   return { ...t, acks: { ...t.acks, [id]: [...list, a] } };
 }
 
-/** Which actions a status allows for a kind (keeps the UI from offering nonsense). */
-export function canIssue(d: DocRow): boolean {
-  if (d.status === "superseded" || d.status === "construction") return false;
+/** Which actions a status allows for a kind (keeps the UI from offering nonsense). `siteRev` = revision of the current
+ *  controlled copy: an issued revision without its copy (a failed issue) may be issued again. */
+export function canIssue(d: DocRow, siteRev?: string): boolean {
+  if (d.status === "superseded") return false;
+  if (d.status === "construction") return siteRev !== d.current.revLabel; // no controlled copy of this revision yet
   if (d.kind === "submittal") return RELEASABLE.includes(d.status);
   return d.kind === "design";
 }

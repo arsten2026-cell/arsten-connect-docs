@@ -60,7 +60,7 @@ export interface ConnectApi {
   rootFolderId(): Promise<string>;
   readText(fileId: string): Promise<{ text: string; versionId: string }>;
   createFolder(name: string, parentId: string): Promise<string>;
-  upload(parentId: string, name: string, body: Blob, ifMatchVersionId?: string): Promise<UploadResult>;
+  upload(parentId: string, name: string, body: Blob, ifMatchVersionId?: string, mustBeNew?: boolean): Promise<UploadResult>;
   downloadUrl(fileId: string, versionId?: string): Promise<string>;
   // legacy ToDos (Connect native)
   listTodos(): Promise<NativeTodo[]>;
@@ -217,9 +217,10 @@ export class RestConnectApi implements ConnectApi {
     return r.id;
   }
 
-  async upload(parentId: string, name: string, body: Blob, ifMatchVersionId?: string): Promise<UploadResult> {
+  async upload(parentId: string, name: string, body: Blob, ifMatchVersionId?: string, mustBeNew?: boolean): Promise<UploadResult> {
     const headers: Record<string, string> = { "tc-enable-process": "false" };
     if (ifMatchVersionId) headers["If-Match"] = ifMatchVersionId;
+    else if (mustBeNew) headers["If-None-Match"] = "*"; // fail if someone created the file meanwhile
     const init: any = await this.json(
       `${this.coreBase}/files/fs/upload?parentId=${encodeURIComponent(parentId)}&parentType=FOLDER`,
       { method: "POST", headers, body: JSON.stringify({ name }) },

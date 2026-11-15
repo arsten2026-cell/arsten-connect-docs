@@ -1,6 +1,6 @@
 import { ApiError, type ConnectApi } from "./api";
 import {
-  addDays, addTransmittal, nextRfiId, nextTransmittalId, revId, setStatus,
+  addDays, addTransmittal, applyPurpose, nextRfiId, nextTransmittalId, revId, setStatus,
   type Actor, type DocRow, type DocStatus, type Rfi, type SiteCopy, type SnapshotItem, type Transmittal, type TransmittalPurpose,
   DEFAULT_SITE_FOLDER, TRACKER_FOLDER,
 } from "./model";
@@ -110,13 +110,14 @@ export async function issueForConstruction(ctx: OpsContext, docs: DocRow[], opt:
   const now = new Date().toISOString();
   let tr!: Transmittal;
   ctx.progress?.("Трансмитал…");
+  // 1. the transmittal record only; statuses follow per document once its controlled copy exists (a failed copy can be retried)
   await store.save((t) => {
     tr = {
       id: nextTransmittalId(t, ctx.projectCode()), date: opt.date || today(), to: opt.to.trim() || "Обект / Site", attn: opt.attn?.trim() || undefined,
       purpose, note: opt.note?.trim() || undefined, by: actor.name, byId: actor.id, createdAt: now,
       items: docs.map((d) => ({ key: d.key, ...(d.source === "file" ? { label: d.label } : {}), rev: d.current.revLabel, name: d.current.name, title: d.title || undefined, fileId: d.current.fileId, versionId: d.current.versionId })),
     };
-    return addTransmittal(t, tr, statusOf, actor);
+    return addTransmittal(t, tr, statusOf, actor, purpose !== "For construction");
   });
 
   let copies = 0;
@@ -125,6 +126,7 @@ export async function issueForConstruction(ctx: OpsContext, docs: DocRow[], opt:
     await folders.init();
     const base = sitePath(store.tracker.settings.siteFolder);
     const newSite: Record<string, SiteCopy> = {};
+    const ok: string[] = [];
     for (const [i, d] of docs.entries()) {
       ctx.progress?.(`Копие за обекта ${i + 1}/${docs.length}: ${d.label}`);
       try {
@@ -140,16 +142,25 @@ export async function issueForConstruction(ctx: OpsContext, docs: DocRow[], opt:
         }
         const up = await api.upload(folderId, name, new Blob([bytes as BlobPart], { type: isPdf(name) ? "application/pdf" : "application/octet-stream" }));
         newSite[d.key] = { fileId: up.fileId, rev: d.current.revLabel, folderId, name, at: now };
+        ok.push(d.key);
         copies++;
         const old = store.tracker.site[d.key];
         if (old && old.fileId !== up.fileId) {
           try { await retireCopy(ctx, folders, base, old, d, tr); } catch (e: any) { warnings.push(`${d.label}: старото копие ${old.name} не беше преместено (${e?.message ?? e})`); }
         }
       } catch (e: any) {
-        warnings.push(`${d.label}: копието за обекта не беше създадено (${e?.message ?? e})`);
+        warnings.push(`${d.label}: копието за обекта не беше създадено – документът НЕ е издаден, опитайте пак (${e?.message ?? e})`);
       }
     }
-    await store.save((t) => ({ ...t, site: { ...t.site, ...newSite } }));
+    // 2. statuses + site copies together, only for the documents that got their copy
+    await store.save((t) => {
+      const withStatus = applyPurpose(t, tr, ok, statusOf, actor);
+      const items = tr.items.filter((it) => ok.includes(it.key));
+      const transmittals = withStatus.transmittals.map((x) => (x.id === tr.id ? { ...x, items: items.length ? items : x.items, ...(items.length ? {} : { note: [x.note, "НЕУСПЕШНО – няма създадени копия"].filter(Boolean).join(" · ") }) } : x));
+      return { ...withStatus, transmittals, site: { ...withStatus.site, ...newSite } };
+    });
+    tr = store.tracker.transmittals.find((x) => x.id === tr.id) ?? tr;
+    if (!ok.length) return { tr, warnings, copies };
   }
 
   let todoId: string | undefined;
@@ -158,7 +169,7 @@ export async function issueForConstruction(ctx: OpsContext, docs: DocRow[], opt:
     ctx.progress?.("Задача за потвърждение…");
     try {
       const todo = await api.createTodo({
-        title: `За изпълнение: ${docs.length} ${docs.length === 1 ? "документ" : "документа"} (${tr.id})`,
+        title: `За изпълнение: ${tr.items.length} ${tr.items.length === 1 ? "документ" : "документа"} (${tr.id})`,
         description: [
           `Издадени за изпълнение на ${bgDate(tr.date)} от ${actor.name}:`,
           ...tr.items.map((it) => `• ${it.label ?? it.key} ${it.rev}${it.title ? " – " + it.title : ""}`),
@@ -207,21 +218,28 @@ async function retireCopy(ctx: OpsContext, folders: Folders, base: string[], old
 }
 
 /** Withdraw a document from site (e.g. issued by mistake, or superseded without a replacement). */
-export async function withdrawFromSite(ctx: OpsContext, d: DocRow, note: string) {
+export async function withdrawFromSite(ctx: OpsContext, d: DocRow, note: string): Promise<string[]> {
+  const warnings: string[] = [];
   const old = ctx.store.tracker.site[d.key];
   const actor = ctx.actor();
   if (old) {
-    const folders = new Folders(ctx.api);
-    await folders.init();
-    const tr = { id: "", date: today() } as Transmittal;
-    await retireCopy(ctx, folders, sitePath(ctx.store.tracker.settings.siteFolder), old, { ...d, current: { ...d.current, revLabel: "—" } }, tr);
+    try {
+      const folders = new Folders(ctx.api);
+      await folders.init();
+      const tr = { id: "", date: today() } as Transmittal;
+      await retireCopy(ctx, folders, sitePath(ctx.store.tracker.settings.siteFolder), old, { ...d, current: { ...d.current, revLabel: "—" } }, tr);
+    } catch (e: any) {
+      warnings.push(`Копието ${old.name} не беше маркирано/преместено (${e?.message ?? e}); проверете папката ръчно.`);
+    }
   }
+  const rev = old?.rev ?? d.current.revLabel; // the revision that was on site
   await ctx.store.save((t) => {
     const site = { ...t.site };
     delete site[d.key];
-    const n = setStatus(t, d.key, d.current.revLabel, "superseded", d.status, actor, note || "Изтеглен от обекта");
+    const n = setStatus(t, d.key, rev, "superseded", "construction", actor, note || "Изтеглен от обекта");
     return { ...n, site };
   });
+  return warnings;
 }
 
 // ---------- RFIs ----------

@@ -93,6 +93,20 @@ describe("transmittals, acks, numbering", () => {
     expect(t2.status["k@R03"]).toBe("construction");
     expect(t2.log).toHaveLength(1);
   });
+  it("a retry after a conflict uses the fresh stored status, not the stale screen value", () => {
+    const fresh = setStatus(emptyTracker(), "k", "R01", "construction", "received", A);
+    // the screen still showed "received"; the user picks "review" -> the log records construction -> review honestly
+    const t = setStatus(fresh, "k", "R01", "review", "received", A);
+    expect(t.log[1]).toMatchObject({ from: "construction", to: "review" });
+  });
+  it("transmittals respect the kind and the designer's decision", () => {
+    let t = setMeta(emptyTracker(), "s", { kind: "submittal" });
+    t = setStatus(t, "s", "v1", "B", "submitted", A);
+    const tr = { id: "TR-1028-001", date: "2026-11-05", to: "X", purpose: "For review" as const, by: "N", createdAt: "x", items: [{ key: "s", rev: "v1", name: "x", fileId: "f" }, { key: "r", rev: "v1", name: "y", fileId: "g" }] };
+    const t2 = addTransmittal(setMeta(t, "r", { kind: "record" }), tr, () => "draft", A);
+    expect(t2.status["s@v1"]).toBe("B"); // decision kept
+    expect(t2.status["r@v1"]).toBeUndefined(); // "review" is not a record status
+  });
   it("one acknowledgement per person", () => {
     let t = addAck(emptyTracker(), "k", "R01", { by: "N", byId: "u1", at: "x", via: "app" });
     t = addAck(t, "k", "R01", { by: "N", byId: "u1", at: "y", via: "app" });
@@ -101,7 +115,8 @@ describe("transmittals, acks, numbering", () => {
   it("canIssue only for received design or approved shop drawings", () => {
     const base = buildRegister(items, emptyTracker(), new Map()).docs[0];
     expect(canIssue(base)).toBe(true);
-    expect(canIssue({ ...base, status: "construction" })).toBe(false);
+    expect(canIssue({ ...base, status: "construction" }, base.current.revLabel)).toBe(false); // already on site
+    expect(canIssue({ ...base, status: "construction" })).toBe(true); // issued but its copy failed: may retry
     expect(canIssue({ ...base, kind: "submittal", status: "C" })).toBe(false);
     expect(canIssue({ ...base, kind: "submittal", status: "B" })).toBe(true);
     expect(canIssue({ ...base, kind: "record", status: "draft" })).toBe(false);

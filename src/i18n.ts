@@ -69,6 +69,8 @@ const dict = {
   currentNo: ["НЕ Е ТЕКУЩ", "NOT CURRENT"],
   currentRev: ["текуща ревизия", "current revision"],
   ack: ["Потвърждавам получаване", "Acknowledge receipt"],
+  newerReceived: ["получена нова ревизия", "newer revision received"],
+  skipped: ["Пропуснати (на обекта / заменени / решение на проектанта)", "Skipped (on site / superseded / designer decision)"],
   ackAll: ["Потвърди всички нови", "Acknowledge all new"],
   acked: ["Потвърдено", "Acknowledged"],
   ackedBy: ["Потвърдили", "Acknowledged by"],

@@ -58,7 +58,8 @@ export class TrackerStore {
       const folderId = await this.ensureFolder();
       const body = new Blob([JSON.stringify(next, null, 1)], { type: "application/json" });
       try {
-        const r = await this.api.upload(folderId, TRACKER_FILE, body, this.versionId);
+        // first save: If-None-Match * so two people creating tracker.json at once cannot overwrite each other
+        const r = await this.api.upload(folderId, TRACKER_FILE, body, this.versionId, !this.versionId);
         this.fileId = r.fileId;
         this.versionId = r.versionId;
         this.tracker = next;

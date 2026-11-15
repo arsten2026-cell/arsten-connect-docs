@@ -88,9 +88,10 @@ export class MockConnectApi implements ConnectApi {
     this.items.push({ id, nm: name, pid: parentId, tp: "FOLDER" });
     return id;
   }
-  async upload(parentId: string, name: string, body: Blob, ifMatch?: string): Promise<UploadResult> {
+  async upload(parentId: string, name: string, body: Blob, ifMatch?: string, mustBeNew?: boolean): Promise<UploadResult> {
     await delay();
     let f = this.items.find((i) => i.tp === "FILE" && i.nm === name && i.pid === parentId);
+    if (f && mustBeNew) throw new ApiError(412, "mock upload", "exists");
     if (f && ifMatch && f.vid !== ifMatch) throw new ApiError(412, "mock upload", "version conflict");
     if (!f) this.items.push((f = { id: "fl" + this.seq++, nm: name, pid: parentId, tp: "FILE", rv: 0 }));
     f.vid = "v" + this.seq++;

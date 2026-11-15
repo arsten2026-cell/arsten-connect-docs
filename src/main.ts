@@ -4,7 +4,7 @@ import { TrackerStore } from "./store";
 import {
   addAck, buildRegister, canIssue, emptyTracker, isOverdue, mostCommonProject, nextTransmittalId, revId, setMeta, setStatus, addTransmittal,
   statusForPurpose, addDays, nextPackageId, ALL_STATUSES, KINDS, STATUS_BY_KIND, DEFAULT_SITE_FOLDER, DEFAULT_STATUS as DEFAULT_FOR,
-  type DocRow, type DocStatus, type Kind, type Register, type SnapshotItem, type Transmittal, type TransmittalPurpose, type UserRef, type Rfi, type DocMeta,
+  type DocRow, type DocStatus, type Kind, type SiteCopy, type Register, type SnapshotItem, type Transmittal, type TransmittalPurpose, type UserRef, type Rfi, type DocMeta,
 } from "./model";
 import { compilePattern, DEFAULT_PATTERN, DISCIPLINES, parseName } from "./naming";
 import { getLang, initLang, setLang, t } from "./i18n";
@@ -32,6 +32,7 @@ async function asset(path: string) {
 }
 
 type Assignee = { type: "USER" | "GROUP"; id: string; name: string };
+type SiteEntry = { d: DocRow; rev: string; copy?: SiteCopy; newer?: string };
 
 class App {
   root = document.getElementById("app")!;
@@ -168,7 +169,21 @@ class App {
     return this.acksOf(key, rev).some((a) => (me.id && a.byId === me.id) || a.by === me.name);
   }
 
-  siteDocs() { return this.reg.docs.filter((d) => d.status === "construction"); }
+  /** What is on site: the controlled copies (tracker.site), plus documents issued before copies existed. A copy stays
+   *  listed (with its own revision) while a newer revision is received but not yet issued. */
+  siteEntries(): SiteEntry[] {
+    const out: SiteEntry[] = [];
+    const seen = new Set<string>();
+    for (const [key, copy] of Object.entries(this.store.tracker.site)) {
+      const d = this.doc(key);
+      if (!d) continue;
+      seen.add(key);
+      out.push({ d, rev: copy.rev, copy, newer: d.current.revLabel !== copy.rev && d.status !== "construction" ? d.current.revLabel : undefined });
+    }
+    for (const d of this.reg.docs) if (!seen.has(d.key) && d.status === "construction") out.push({ d, rev: d.current.revLabel });
+    return out;
+  }
+  issuable = (d: DocRow) => canIssue(d, this.store.tracker.site[d.key]?.rev);
   siteRootId(): string | undefined {
     const want = sitePath(this.store.tracker.settings.siteFolder).join(" / ");
     for (const id of this.reg.siteFolderIds) {
@@ -235,14 +250,14 @@ class App {
           h("span", { id: "busy", class: "mono muted" }, this.busy),
           h("button", { onclick: () => this.refresh(), title: t("refresh") }, "↻"),
           h("button", { onclick: () => { setLang(getLang() === "bg" ? "en" : "bg"); this.setMenu(); this.render(); } }, getLang() === "bg" ? "EN" : "BG"))),
-      h("nav", { class: "tabs" }, tab("site", badge(this.siteDocs().filter((d) => !this.ackedByMe(d.key, d.current.revLabel)).length)), tab("register", badge(inbox)),
+      h("nav", { class: "tabs" }, tab("site", badge(this.siteEntries().filter((e) => !this.ackedByMe(e.d.key, e.rev)).length)), tab("register", badge(inbox)),
         tab("transmittals"), tab("rfis", badge(openRfis)), tab("settings")));
   }
 
   // ---------------- За изпълнение (site set)
   viewSite(body: HTMLElement) {
-    const docs = this.siteDocs();
-    const newForMe = docs.filter((d) => !this.ackedByMe(d.key, d.current.revLabel));
+    const entries = this.siteEntries();
+    const newForMe = entries.filter((e) => !this.ackedByMe(e.d.key, e.rev));
     const rfisOpen = this.store.tracker.rfis.filter((r) => r.state === "open");
     const overdue = rfisOpen.filter((r) => isOverdue(r.due, false)).length;
     const inbox = this.reg.docs.filter((d) => d.status === "received" || d.status === "submitted").length;
@@ -256,21 +271,21 @@ class App {
       const hits = this.reg.docs.filter((d) => d.label.toLowerCase().includes(q) || d.key.toLowerCase().includes(q) || d.current.name.toLowerCase().includes(q)).slice(0, 6);
       if (!hits.length) { clear(out, h("div", { class: "cur no" }, h("b", null, t("currentNo")), " – ", t("noDocs"))); return; }
       clear(out, hits.map((d) => {
-        const ok = d.status === "construction";
-        const siteRev = this.store.tracker.site[d.key]?.rev;
-        return h("div", { class: "cur " + (ok ? "yes" : "no"), onclick: () => this.openDoc(d.key) },
-          h("b", null, ok ? t("currentYes") : t("currentNo")), " · ",
-          h("span", { class: "mono" }, d.label), ` · ${t("currentRev")}: `, h("b", { class: "mono" }, ok ? d.current.revLabel : siteRev ?? "—"),
-          ok ? "" : h("span", { class: "muted" }, ` (${stLabel(d.status)} ${d.current.revLabel})`));
+        const e = entries.find((x) => x.d.key === d.key);
+        return h("div", { class: "cur " + (e ? "yes" : "no"), onclick: () => this.openDoc(d.key) },
+          h("b", null, e ? t("currentYes") : t("currentNo")), " · ",
+          h("span", { class: "mono" }, d.label), ` · ${t("currentRev")}: `, h("b", { class: "mono" }, e ? e.rev : "—"),
+          e?.newer ? h("span", { class: "muted" }, ` (${t("newerReceived")} ${e.newer})`) : "",
+          e ? "" : h("span", { class: "muted" }, ` (${stLabel(d.status)} ${d.current.revLabel})`));
       }));
     };
-    const search = h("input", { type: "search", class: "big", placeholder: t("isCurrentHint"), value: this.siteQ, oninput: (e: Event) => { this.siteQ = (e.target as HTMLInputElement).value; check(); } });
+    const search = h("input", { type: "search", class: "big", placeholder: t("isCurrentHint"), value: this.siteQ, oninput: (ev: Event) => { this.siteQ = (ev.target as HTMLInputElement).value; check(); } });
     body.append(h("div", { class: "currentbox" }, h("label", null, t("isCurrent")), search, out));
     check();
 
     const stat = (n: number | string, label: string, cls = "", onclick?: () => void) => h("div", { class: `stat ${cls}`, onclick }, h("div", { class: "n" }, n), h("div", { class: "l" }, label));
     body.append(h("div", { class: "stats" },
-      stat(docs.length, t("st_construction").toLowerCase()),
+      stat(entries.length, t("st_construction").toLowerCase()),
       stat(newForMe.length, t("newForMe"), newForMe.length ? "on" : ""),
       stat(inbox, t("inbox").toLowerCase(), inbox ? "on" : "", () => { this.kind = "design"; this.status = "received"; this.go("register"); }),
       stat(rfisOpen.length, t("openRfi"), "", () => this.go("rfis")),
@@ -281,28 +296,28 @@ class App {
       ? h("a", { href: folderUrl(this.host.projectId, rootId, this.host.location), target: "_top" }, `„${folderName}“`)
       : h("b", null, `„${folderName}“`), "."));
 
-    if (!docs.length) { body.append(h("div", { class: "empty" }, t("siteEmpty"))); return; }
+    if (!entries.length) { body.append(h("div", { class: "empty" }, t("siteEmpty"))); return; }
     if (newForMe.length)
-      body.append(h("div", { class: "toolbar" }, h("button", { class: "primary", onclick: () => this.ackDocs(newForMe) }, `✓ ${t("ackAll")} (${newForMe.length})`)));
+      body.append(h("div", { class: "toolbar" }, h("button", { class: "primary", onclick: () => this.ack(newForMe) }, `✓ ${t("ackAll")} (${newForMe.length})`)));
 
-    const parts = [...new Set(docs.map((d) => d.disc))].sort();
+    const parts = [...new Set(entries.map((e) => e.d.disc))].sort();
     const rows: HTMLElement[] = [];
     for (const p of parts) {
-      const list = docs.filter((d) => d.disc === p);
+      const list = entries.filter((e) => e.d.disc === p).sort((a, b) => a.d.label.localeCompare(b.d.label, undefined, { numeric: true }));
       rows.push(h("tr", { class: "group" }, h("td", { colspan: 6 }, h("b", null, p), ` · ${DISCIPLINES[p]?.[getLang()] ?? ""} · ${list.length}`)));
-      for (const d of list) {
-        const acks = this.acksOf(d.key, d.current.revLabel);
-        const mine = this.ackedByMe(d.key, d.current.revLabel);
-        const copy = this.store.tracker.site[d.key];
+      for (const e of list) {
+        const d = e.d;
+        const acks = this.acksOf(d.key, e.rev);
+        const mine = this.ackedByMe(d.key, e.rev);
         rows.push(h("tr", { class: "row" + (mine ? "" : " fresh"), onclick: () => this.openDoc(d.key) },
-          h("td", { class: "key" }, d.label),
-          h("td", { class: "num" }, h("span", { class: "revbig" }, d.current.revLabel)),
+          h("td", { class: "key" }, d.label, e.newer ? h("div", { class: "muted small" }, `${t("newerReceived")} ${e.newer}`) : ""),
+          h("td", { class: "num" }, h("span", { class: "revbig" }, e.rev)),
           h("td", { class: "title hide-sm" }, d.title || h("span", { class: "muted" }, d.current.name)),
-          h("td", { class: "date" }, bgDate(this.issuedAt(d.key, d.current.revLabel))),
+          h("td", { class: "date" }, bgDate(this.issuedAt(d.key, e.rev) ?? e.copy?.at)),
           h("td", { class: "hide-sm", title: acks.map((a) => `${a.by} ${bgDate(a.at)}`).join("\n") }, acks.length ? `✓ ${acks.length}` : h("span", { class: "muted" }, t("notAcked"))),
-          h("td", { onclick: (e: Event) => e.stopPropagation() },
-            copy ? h("button", { class: "link", onclick: () => this.openFile(copy.fileId) }, "PDF") : "",
-            mine ? h("span", { class: "okmark", title: t("acked") }, " ✓") : h("button", { class: "small", onclick: () => this.ackDocs([d]) }, t("ack")))));
+          h("td", { onclick: (ev: Event) => ev.stopPropagation() },
+            e.copy ? h("button", { class: "link", onclick: () => this.openFile(e.copy!.fileId) }, "PDF") : "",
+            mine ? h("span", { class: "okmark", title: t("acked") }, " ✓") : h("button", { class: "small", onclick: () => this.ack([e]) }, t("ack")))));
       }
     }
     body.append(h("div", { class: "tablewrap" }, h("table", null,
@@ -311,12 +326,17 @@ class App {
       h("tbody", null, rows))));
   }
 
-  async ackDocs(docs: DocRow[]) {
+  async ack(entries: { d: DocRow; rev: string }[]) {
     await this.run(t("saving"), async () => {
       const a = { by: this.host.user.name, byId: this.host.user.id, at: new Date().toISOString(), via: "app" as const };
-      await this.store.save((tr) => docs.reduce((n, d) => addAck(n, d.key, d.current.revLabel, a), tr));
-      this.toast(`${t("acked")}: ${docs.length}`);
+      await this.store.save((tr) => entries.reduce((n, e) => addAck(n, e.d.key, e.rev, a), tr));
+      this.toast(`${t("acked")}: ${entries.length}`);
     });
+  }
+
+  async ackDocs(docs: DocRow[]) {
+    const site = this.store.tracker.site;
+    await this.ack(docs.map((d) => ({ d, rev: site[d.key]?.rev ?? d.current.revLabel })));
   }
 
   // ---------------- Регистър
@@ -364,14 +384,14 @@ class App {
       const docs = this.reg.docs.filter((d) => this.sel.has(d.key));
       if (!docs.length || !this.canEdit) { clear(actions); actions.hidden = true; return; }
       actions.hidden = false;
-      const issuable = docs.every(canIssue);
+      const issuable = docs.every(this.issuable);
       clear(actions,
         h("span", null, `${docs.length} ${t("selected")}`),
         h("button", { class: "primary", disabled: !issuable, title: issuable ? "" : "Само получени проектни документи или одобрени работни чертежи (A/B)", onclick: () => this.startIssue(docs.map((d) => d.key)) }, `▶ ${t("issue")}`),
         this.kind === "design" ? h("button", { onclick: () => this.bulkStatus(docs, "info") }, t("markInfo")) : "",
         this.kind === "design" ? h("button", { onclick: () => this.bulkStatus(docs, "review") }, t("markReview")) : "",
         h("select", { onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value as DocStatus; if (v) this.bulkStatus(docs, v); } },
-          h("option", { value: "" }, t("setStatus") + "…"), STATUS_BY_KIND[this.kind].map((s) => h("option", { value: s }, stLabel(s)))),
+          h("option", { value: "" }, t("setStatus") + "…"), STATUS_BY_KIND[this.kind].filter((s) => !["A", "B", "C", "D", "superseded", "construction"].includes(s)).map((s) => h("option", { value: s }, stLabel(s)))),
         h("select", { onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value as Kind; if (v) this.bulkKind(docs, v); } },
           h("option", { value: "" }, t("setKind") + "…"), KINDS.filter((k) => k !== this.kind).map((k) => h("option", { value: k }, "→ " + t("kind_" + k)))),
         h("button", { onclick: () => this.startRfi(docs.map((d) => d.key)) }, t("newRfi")),
@@ -418,7 +438,7 @@ class App {
   }
 
   statusCell(d: DocRow, rev: string, cur: DocStatus) {
-    const editable = this.canEdit && cur !== "superseded" && !(d.kind === "submittal" && ["A", "B", "C", "D"].includes(cur) && !can.decide(this.access.role));
+    const editable = this.canEdit && cur !== "superseded" && cur !== "construction" && !(d.kind === "submittal" && ["A", "B", "C", "D"].includes(cur) && !can.decide(this.access.role));
     if (!editable) return h("span", { class: `st s-${slug(cur)}` }, stLabel(cur));
     const opts = STATUS_BY_KIND[d.kind].filter((s) => s !== "superseded" && (d.kind !== "submittal" || !["A", "B", "C", "D"].includes(s) || can.decide(this.access.role)));
     return h("select", { class: `stsel s-${slug(cur)}`, onchange: (e: Event) => this.changeStatus(d, rev, (e.target as HTMLSelectElement).value as DocStatus) },
@@ -440,7 +460,10 @@ class App {
   async bulkStatus(docs: DocRow[], to: DocStatus) {
     if (to === "construction") { this.startIssue(docs.map((d) => d.key)); return; }
     await this.run(t("saving"), async () => {
-      await this.store.save((tr) => docs.reduce((n, d) => (d.status === "superseded" ? n : setStatus(n, d.key, d.current.revLabel, to, d.status, this.actor())), tr));
+      const skip = docs.filter((d) => d.status === "superseded" || d.status === "construction" || (["A", "B", "C", "D"].includes(d.status) && !can.decide(this.access.role)));
+      const go = docs.filter((d) => !skip.includes(d));
+      await this.store.save((tr) => go.reduce((n, d) => setStatus(n, d.key, d.current.revLabel, to, d.status, this.actor()), tr));
+      if (skip.length) this.error = `${t("skipped")}: ${skip.map((d) => d.label).join(", ")}`;
       this.sel.clear();
       this.rebuild();
       this.toast(`${docs.length} → ${stLabel(to)}`);
@@ -543,7 +566,7 @@ class App {
 
   // ---------------- issue for construction
   startIssue(keys: string[]) {
-    const docs = keys.map((k) => this.doc(k)).filter((d): d is DocRow => !!d && canIssue(d));
+    const docs = keys.map((k) => this.doc(k)).filter((d): d is DocRow => !!d && this.issuable(d));
     if (!docs.length) return;
     this.issue = { keys: docs.map((d) => d.key), to: "Обект / Site", attn: "", note: "", date: today() };
     this.tab = "register";
@@ -671,7 +694,7 @@ class App {
       h("div", { class: "soft" }, d.title || d.current.name),
       h("div", { class: "bigstatus" }, h("span", { class: `st s-${slug(d.status)}` }, stLabel(d.status)), " ", h("span", { class: "revbig" }, d.current.revLabel)),
       h("div", { class: "actions wrap" },
-        this.canEdit && canIssue(d) ? h("button", { class: "primary", onclick: () => { close(); this.startIssue([key]); } }, `▶ ${t("issue")}`) : "",
+        this.canEdit && this.issuable(d) ? h("button", { class: "primary", onclick: () => { close(); this.startIssue([key]); } }, `▶ ${t("issue")}`) : "",
         copy ? h("button", { onclick: () => this.openFile(copy.fileId) }, `PDF „${t("st_construction")}“`) : "",
         h("button", { onclick: () => this.openFile(d.current.fileId, d.current.versionId) }, t("download") + " (оригинал)"),
         d.status === "construction" && !this.ackedByMe(key, d.current.revLabel) ? h("button", { onclick: () => this.ackDocs([d]) }, "✓ " + t("ack")) : "",
@@ -726,7 +749,8 @@ class App {
     const note = prompt(`${t("withdraw")}: ${d.label} ${d.current.revLabel}?`, "");
     if (note === null) return;
     await this.run(t("saving"), async () => {
-      await withdrawFromSite(this.ctx, d, note);
+      const w = await withdrawFromSite(this.ctx, d, note);
+      if (w.length) this.error = w.join(" · ");
       await this.reloadFiles();
       this.toast(`${d.label} → ${stLabel("superseded")}`);
     });

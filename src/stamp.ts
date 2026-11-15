@@ -62,23 +62,23 @@ function fit(font: PDFFont, text: string, size: number, max: number): string {
 
 /** Visible page box, respecting rotation (drawings are often stored as portrait pages rotated 90°). */
 function frame(page: PDFPage) {
-  const { width, height } = page.getSize();
+  const box = page.getCropBox(); // visible area; its origin is not always 0,0
   const rot = ((page.getRotation().angle % 360) + 360) % 360;
-  return { width, height, rot };
+  return { width: box.width, height: box.height, ox: box.x, oy: box.y, rot };
 }
 
 /** Draw in "visual" coordinates (as the page appears on screen) whatever the page rotation is. */
 function visual(page: PDFPage) {
-  const { width, height, rot } = frame(page);
+  const { width, height, ox, oy, rot } = frame(page);
   const vw = rot === 90 || rot === 270 ? height : width;
   const vh = rot === 90 || rot === 270 ? width : height;
   // map a visual point to page space
   const map = (x: number, y: number): [number, number] => {
     switch (rot) {
-      case 90: return [width - y, x];
-      case 180: return [width - x, height - y];
-      case 270: return [y, height - x];
-      default: return [x, y];
+      case 90: return [ox + width - y, oy + x];
+      case 180: return [ox + width - x, oy + height - y];
+      case 270: return [ox + y, oy + height - x];
+      default: return [ox + x, oy + y];
     }
   };
   return { vw, vh, rot, map };
@@ -86,6 +86,8 @@ function visual(page: PDFPage) {
 
 export async function stampPdf(original: ArrayBuffer | Uint8Array, info: StampInfo, loadFont: FontLoader): Promise<Uint8Array> {
   const doc = await PDFDocument.load(original, { ignoreEncryption: true, updateMetadata: false });
+  // pdf-lib cannot write encrypted files correctly: refuse, the caller copies the file unstamped and warns
+  if (doc.isEncrypted) throw new Error("PDF файлът е защитен (криптиран) – не може да се постави печат");
   doc.registerFontkit(fontkit);
   const reg = await doc.embedFont(await loadFont("Ubuntu-Regular"), { subset: true });
   const med = await doc.embedFont(await loadFont("Ubuntu-Medium"), { subset: true });

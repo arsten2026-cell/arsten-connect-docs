@@ -40,7 +40,8 @@ and the ToDo is their notice + acknowledgement (closing it = received). The in-a
 
 ### Roles (from Connect groups, same as the other Arsten / MULTIPLAN panels)
 admin (project admin / 00_ADMIN) and GC (GENERAL CONTRACTOR, EXECUTION PROJECT MANAGER): everything ·
-designers (DESIGNERS, STRUCTURAL DESIGNER): read, answer RFIs, decide shop drawings · others: no access.
+designers (DESIGNERS, STRUCTURAL DESIGNER): read, answer RFIs, decide shop drawings · client, subcontractors,
+viewers, fabricator: no access (same as the tile in the combined panel). Someone in several groups has all their roles' rights.
 
 ### Data
 One file per project: `_ArstenDocs/tracker.json` (schema 2; v1 files are migrated on load). Saves use If-Match and retry

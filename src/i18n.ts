@@ -181,7 +181,7 @@ const dict = {
   role_viewer: ["преглед", "viewer"],
   role_none: ["без роля", "no role"],
   readOnly: ["Само преглед – промени правят изпълнителят и администраторът.", "Read only – changes are made by the general contractor and admins."],
-  noAccess: ["Нямате достъп до документите на този проект.", "You have no access to this project's documents."],
+  noAccess: ["Нямате достъп до документите на този проект. Документи е за администратор, изпълнител (02) и проектанти (04, 4.1).", "You have no access to this project's documents. Documents is for admins, the general contractor (02) and designers (04, 4.1)."],
   mockBanner: ["Демо режим – отворено извън Trimble Connect, данните са примерни.", "Demo mode – opened outside Trimble Connect, sample data."],
   meta_number: ["Номер (показван)", "Number (shown)"],
   meta_title: ["Наименование", "Title"],

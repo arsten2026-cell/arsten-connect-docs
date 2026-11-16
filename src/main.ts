@@ -39,7 +39,7 @@ class App {
   host!: Host;
   store!: TrackerStore;
   ctx!: OpsContext;
-  access: Access = { role: "none", groups: [] };
+  access: Access = { roles: [], role: "none", groups: [] };
   items: SnapshotItem[] = [];
   users: UserRef[] = [];
   groups: GroupRef[] = [];
@@ -91,7 +91,7 @@ class App {
   }
 
   actor() { return { name: this.host.user.name, id: this.host.user.id }; }
-  get canEdit() { return can.edit(this.access.role); }
+  get canEdit() { return can.edit(this.access); }
 
   projectCode() {
     return this.store.tracker.settings.projectCode || mostCommonProject(this.reg.docs) || /^\d{3,5}/.exec(this.host.projectName)?.[0] || "PRJ";
@@ -209,12 +209,12 @@ class App {
     const shell = h("div", { class: "shell" });
     shell.append(this.header());
     if (!this.host.inConnect) shell.append(h("div", { class: "banner" }, t("mockBanner")));
-    if (this.access.role === "none" && this.host.inConnect && !this.busy) {
+    if (!can.view(this.access) && this.host.inConnect && !this.busy) {
       shell.append(h("div", { class: "banner error" }, t("noAccess"), this.access.error ? ` (${this.access.error})` : ""));
       clear(this.root, shell);
       return;
     }
-    if (!this.canEdit && this.access.role !== "none" && this.host.inConnect) shell.append(h("div", { class: "banner" }, t("readOnly")));
+    if (!this.canEdit && can.view(this.access) && this.host.inConnect) shell.append(h("div", { class: "banner" }, t("readOnly")));
     if (this.error) shell.append(h("div", { class: "banner error" }, this.error));
     if (this.info) shell.append(h("div", { class: "banner ok" }, this.info, " ", h("button", { class: "link", onclick: () => { this.info = ""; this.render(); } }, "×")));
     const body = h("div", { id: "body" });
@@ -438,9 +438,9 @@ class App {
   }
 
   statusCell(d: DocRow, rev: string, cur: DocStatus) {
-    const editable = this.canEdit && cur !== "superseded" && cur !== "construction" && !(d.kind === "submittal" && ["A", "B", "C", "D"].includes(cur) && !can.decide(this.access.role));
+    const editable = this.canEdit && cur !== "superseded" && cur !== "construction" && !(d.kind === "submittal" && ["A", "B", "C", "D"].includes(cur) && !can.decide(this.access));
     if (!editable) return h("span", { class: `st s-${slug(cur)}` }, stLabel(cur));
-    const opts = STATUS_BY_KIND[d.kind].filter((s) => s !== "superseded" && (d.kind !== "submittal" || !["A", "B", "C", "D"].includes(s) || can.decide(this.access.role)));
+    const opts = STATUS_BY_KIND[d.kind].filter((s) => s !== "superseded" && (d.kind !== "submittal" || !["A", "B", "C", "D"].includes(s) || can.decide(this.access)));
     return h("select", { class: `stsel s-${slug(cur)}`, onchange: (e: Event) => this.changeStatus(d, rev, (e.target as HTMLSelectElement).value as DocStatus) },
       opts.map((s) => h("option", { value: s, selected: s === cur }, stLabel(s))));
   }
@@ -460,7 +460,7 @@ class App {
   async bulkStatus(docs: DocRow[], to: DocStatus) {
     if (to === "construction") { this.startIssue(docs.map((d) => d.key)); return; }
     await this.run(t("saving"), async () => {
-      const skip = docs.filter((d) => d.status === "superseded" || d.status === "construction" || (["A", "B", "C", "D"].includes(d.status) && !can.decide(this.access.role)));
+      const skip = docs.filter((d) => d.status === "superseded" || d.status === "construction" || (["A", "B", "C", "D"].includes(d.status) && !can.decide(this.access)));
       const go = docs.filter((d) => !skip.includes(d));
       await this.store.save((tr) => go.reduce((n, d) => setStatus(n, d.key, d.current.revLabel, to, d.status, this.actor()), tr));
       if (skip.length) this.error = `${t("skipped")}: ${skip.map((d) => d.label).join(", ")}`;
@@ -682,7 +682,7 @@ class App {
     };
     drawMeta(false);
     const decision = h("div");
-    if (d.kind === "submittal" && can.decide(this.access.role) && d.status !== "superseded" && d.status !== "construction") {
+    if (d.kind === "submittal" && can.decide(this.access) && d.status !== "superseded" && d.status !== "construction") {
       const remark = h("input", { placeholder: t("note") });
       clear(decision, h("h3", null, t("decide")), remark, h("div", { class: "actions wrap" },
         (["A", "B", "C", "D"] as const).map((x) => h("button", { class: `dec dec-${x}`, onclick: () => this.decide(d, x, (remark as HTMLInputElement).value) }, stLabel(x)))));
@@ -925,7 +925,7 @@ class App {
         r.docs.length ? h("div", null, `${t("rfiDocs")}: `, r.docs.map((k) => h("button", { class: "link", onclick: () => { this.tab = "register"; const d = this.doc(k); if (d) this.kind = d.kind; this.openKey = k; this.render(); } }, this.labelOf(k) + " "))) : "",
         r.answer ? h("div", { class: "a" }, h("b", null, `${t("rfiAnswer")} (${r.answeredBy}, ${bgDate(r.answeredAt)}): `), r.answer,
           r.outcome ? h("div", { class: "muted" }, `${t("rfiOutcome")}: ${t("out_" + r.outcome)}`) : "") : "",
-        r.state === "open" && can.answer(this.access.role) ? h("div", null, answer,
+        r.state === "open" && can.answer(this.access) ? h("div", null, answer,
           h("div", { class: "actions wrap" },
             h("select", { onchange: (e: Event) => { outcome = (e.target as HTMLSelectElement).value as Rfi["outcome"]; } },
               (["none", "order", "revision"] as const).map((o) => h("option", { value: o }, t("out_" + o)))),
@@ -1006,7 +1006,7 @@ class App {
     const editable = this.canEdit;
     body.append(h("div", { class: "panel" },
       h("h2", null, t("settings")),
-      h("div", { class: "metagrid" }, h("span", null, t("role")), h("b", null, t("role_" + this.access.role), this.access.groups.length ? ` (${this.access.groups.join(", ")})` : "")),
+      h("div", { class: "metagrid" }, h("span", null, t("role")), h("b", null, (this.access.roles.length ? this.access.roles : ["none"]).map((r) => t("role_" + r)).join(", "), this.access.groups.length ? ` (${this.access.groups.join(", ")})` : "")),
       h("div", { class: "form" },
         h("label", null, t("siteFolder")), h("div", null, inp("siteFolder", { style: "width:100%" }), h("div", { class: "muted small" }, t("siteFolderHelp"))),
         h("label", null, t("ackAssignee")), this.assigneeSelect(v.ack, (x) => { v.ack = x; }),

@@ -197,13 +197,13 @@ export type Key = keyof typeof dict;
 let lang: Lang = "bg";
 export function setLang(l: Lang) {
   lang = l;
-  try { localStorage.setItem("arsten-docs-lang", l); } catch { /* storage blocked */ }
+  try { localStorage.setItem("arsten.lang", l); } catch { /* storage blocked */ }
 }
 export function getLang(): Lang { return lang; }
 export function initLang(hostLanguage?: string) {
   let stored: string | null = null;
   // same site as the other Arsten / MULTIPLAN panels: follow their choice when this app has none
-  try { stored = localStorage.getItem("arsten-docs-lang") ?? localStorage.getItem("arsten.pourStatus.lang"); } catch { /* storage blocked */ }
+  try { stored = localStorage.getItem("arsten.lang") ?? localStorage.getItem("arsten-docs-lang"); } catch { /* storage blocked */ }
   if (stored === "bg" || stored === "en") lang = stored;
   else if (hostLanguage && !hostLanguage.toLowerCase().startsWith("bg")) lang = "bg"; // Bulgarian by default for both companies
 }

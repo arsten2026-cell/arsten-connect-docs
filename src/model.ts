@@ -239,8 +239,28 @@ export interface Register {
   siteFolderIds: Set<string>;
 }
 
-export const TRACKER_FOLDER = "_ArstenDocs";
+/** Project tool folder (one name for Arsten and MULTIPLAN). Only this name is ever created. */
+export const TRACKER_FOLDER = "_AM_Docs";
+/** Older name, still read when a project has not been renamed yet. */
+export const LEGACY_TRACKER_FOLDER = "_ArstenDocs";
+export const TOOL_FOLDERS = [TRACKER_FOLDER, LEGACY_TRACKER_FOLDER];
 export const TRACKER_FILE = "tracker.json";
+
+/**
+ * The tool folder and tracker.json in it. Prefers the folder that already holds tracker.json (_AM_Docs first, then
+ * _ArstenDocs), so data is never lost when another tool created an empty _AM_Docs before the rename; otherwise
+ * _AM_Docs, then _ArstenDocs. Root-level folders win over nested ones of the same name.
+ */
+export function findToolFolder(items: SnapshotItem[]): { folder?: SnapshotItem; file?: SnapshotItem } {
+  const live = items.filter((i) => !i.del);
+  const ids = new Set(live.filter((i) => i.tp === "FOLDER").map((f) => f.id));
+  const named = (nm: string) => live.find((f) => f.tp === "FOLDER" && f.nm === nm && !ids.has(f.pid ?? ""))
+    ?? live.find((f) => f.tp === "FOLDER" && f.nm === nm);
+  const cands = TOOL_FOLDERS.map(named).filter((f): f is SnapshotItem => !!f);
+  const fileIn = (f: SnapshotItem) => live.find((x) => x.tp === "FILE" && x.nm === TRACKER_FILE && x.pid === f.id);
+  for (const f of cands) { const file = fileIn(f); if (file) return { folder: f, file }; }
+  return { folder: cands[0] };
+}
 
 export function folderPathOf(id: string | undefined, folders: Map<string, SnapshotItem>): string {
   const parts: string[] = [];
@@ -283,19 +303,17 @@ export function buildRegister(items: SnapshotItem[], tracker: Tracker, users: Ma
   try { re = compilePattern(tracker.settings.pattern || DEFAULT_PATTERN); } catch { re = compilePattern(DEFAULT_PATTERN); }
   const live = items.filter((i) => !i.del);
   const folders = new Map(live.filter((i) => i.tp === "FOLDER").map((f) => [f.id, f]));
-  const trackerFolder = live.find((f) => f.tp === "FOLDER" && f.nm === TRACKER_FOLDER && !folders.has(f.pid ?? ""))
-    ?? live.find((f) => f.tp === "FOLDER" && f.nm === TRACKER_FOLDER);
+  const { folder: trackerFolder, file: trackerFile } = findToolFolder(live);
   const site = siteFolders(folders, tracker.settings.siteFolder ?? DEFAULT_SITE_FOLDER);
   const excluded = (pid?: string) => {
     let cur = pid ? folders.get(pid) : undefined;
     let guard = 0;
     while (cur && guard++ < 50) {
-      if (cur.nm === TRACKER_FOLDER || site.has(cur.id)) return true;
+      if (TOOL_FOLDERS.includes(cur.nm) || site.has(cur.id)) return true;
       cur = cur.pid ? folders.get(cur.pid) : undefined;
     }
     return false;
   };
-  const trackerFile = trackerFolder ? live.find((f) => f.tp === "FILE" && f.nm === TRACKER_FILE && f.pid === trackerFolder.id) : undefined;
 
   const byKey = new Map<string, { parsed: ParsedName; files: Map<number, SnapshotItem[]> }>();
   const fileDocs: SnapshotItem[] = [];

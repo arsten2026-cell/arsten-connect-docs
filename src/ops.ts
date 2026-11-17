@@ -2,7 +2,7 @@ import { ApiError, type ConnectApi } from "./api";
 import {
   addDays, addTransmittal, applyPurpose, nextRfiId, nextTransmittalId, revId, setStatus,
   type Actor, type DocRow, type DocStatus, type Rfi, type SiteCopy, type SnapshotItem, type Transmittal, type TransmittalPurpose,
-  DEFAULT_SITE_FOLDER, TRACKER_FOLDER,
+  DEFAULT_SITE_FOLDER,
 } from "./model";
 import type { TrackerStore } from "./store";
 import { isPdf, stampPdf, type StampInfo } from "./stamp";
@@ -45,11 +45,12 @@ export class Folders {
   private childOfRoot(name: string) {
     return this.items.find((i) => i.tp === "FOLDER" && !i.del && i.nm === name && (i.pid === this.root || !this.items.some((x) => x.id === i.pid)));
   }
-  async ensure(path: string[]): Promise<string> {
-    let parent = this.root;
+  /** Creates/finds the folder path from the project root, or below `base` when given. */
+  async ensure(path: string[], base?: string): Promise<string> {
+    let parent = base ?? this.root;
     for (const [i, seg] of path.entries()) {
       const name = safeName(seg);
-      const ex = i === 0 ? this.childOfRoot(name) : this.child(parent, name);
+      const ex = i === 0 && !base ? this.childOfRoot(name) : this.child(parent, name);
       if (ex) { parent = ex.id; continue; }
       let id: string;
       try {
@@ -311,7 +312,7 @@ export async function decideSubmittal(ctx: OpsContext, d: DocRow, decision: "A" 
     try {
       const folders = new Folders(ctx.api);
       await folders.init();
-      const folderId = await folders.ensure([TRACKER_FOLDER, "Submittals"]);
+      const folderId = await folders.ensure(["Submittals"], await ctx.store.ensureFolder());
       const bytes = await ctx.api.readBytes(d.current.fileId, d.current.versionId);
       const out = await stampPdf(bytes, stampInfo(ctx, d, "review", undefined, undefined, { decision, remark: remark || undefined }), ctx.loadFont);
       await ctx.api.upload(folderId, safeName(`${d.label} ${d.current.revLabel} - ${decision}`) + ".pdf", new Blob([out as BlobPart], { type: "application/pdf" }));

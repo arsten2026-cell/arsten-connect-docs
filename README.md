@@ -32,7 +32,7 @@ A document is either a file named like `1028-ST-DR-0101_R02_….pdf` (revisions 
 3. The previous copy is stamped red "ЗАМЕНЕН / SUPERSEDED" (as a new Connect version of that copy) and moved to
    `<site folder>/Заменени/`.
 4. Status За изпълнение (older revisions → Заменен) only for documents whose copy was written; a failed one can be issued again.
-5. The transmittal PDF in `_ArstenDocs/Transmittals/`, one Connect ToDo "потвърдете получаване" for the configured
+5. The transmittal PDF in `_AM_Docs/Transmittals/`, one Connect ToDo "потвърдете получаване" for the configured
    group, and an email draft button for people outside Connect.
 
 Site people only need the Connect mobile app: the site folder holds only current stamped drawings (mark it for offline),
@@ -44,8 +44,8 @@ designers (DESIGNERS, STRUCTURAL DESIGNER): read, answer RFIs, decide shop drawi
 viewers, fabricator: no access (same as the tile in the combined panel). Someone in several groups has all their roles' rights.
 
 ### Data
-One file per project: `_ArstenDocs/tracker.json` (schema 2; v1 files are migrated on load). Saves use If-Match and retry
-on conflict; every save is a Connect version (= audit trail). Shop-drawing review copies: `_ArstenDocs/Submittals/`.
+One file per project: `_AM_Docs/tracker.json` (older projects: `_ArstenDocs/`, still read; only `_AM_Docs` is created) (schema 2; v1 files are migrated on load). Saves use If-Match and retry
+on conflict; every save is a Connect version (= audit trail). Shop-drawing review copies: `_AM_Docs/Submittals/`.
 
 ## Going live in a project (checklist)
 1. Install: project Settings → Apps & Capabilities → **+ Add Custom** → manifest URL → on → Allow.

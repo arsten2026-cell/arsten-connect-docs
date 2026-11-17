@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseName } from "./naming";
 import {
-  addAck, addTransmittal, buildRegister, canIssue, emptyTracker, nextRfiId, nextTransmittalId, normalizeTracker, setMeta, setStatus,
+  addAck, addTransmittal, buildRegister, findToolFolder, canIssue, emptyTracker, nextRfiId, nextTransmittalId, normalizeTracker, setMeta, setStatus,
   type SnapshotItem, type Tracker,
 } from "./model";
 
@@ -22,7 +22,7 @@ const items: SnapshotItem[] = [
   { id: "B", nm: "1018-ST-DR-0101_R02_Фундаменти.pdf", tp: "FILE", pid: "F1", vid: "b1", mt: "2026-10-10" },
   { id: "C", nm: "1018-ST-DR-0101_R03.pdf", tp: "FILE", pid: "F1", vid: "c1", mt: "2026-10-20" },
   { id: "E", nm: "notes.txt", tp: "FILE", pid: "F1" },
-  { id: "X", nm: "_ArstenDocs", tp: "FOLDER", pid: "root" },
+  { id: "X", nm: "_AM_Docs", tp: "FOLDER", pid: "root" },
   { id: "T", nm: "tracker.json", tp: "FILE", pid: "X" },
   { id: "S", nm: "ЗА СТРОИТЕЛСТВО", tp: "FOLDER", pid: "root" },
   { id: "S1", nm: "ST", tp: "FOLDER", pid: "S" },
@@ -120,5 +120,24 @@ describe("transmittals, acks, numbering", () => {
     expect(canIssue({ ...base, kind: "submittal", status: "C" })).toBe(false);
     expect(canIssue({ ...base, kind: "submittal", status: "B" })).toBe(true);
     expect(canIssue({ ...base, kind: "record", status: "draft" })).toBe(false);
+  });
+});
+
+describe("tool folder _AM_Docs with fallback to _ArstenDocs", () => {
+  const f = (id: string, nm: string, pid = "root"): SnapshotItem => ({ id, nm, tp: "FOLDER", pid });
+  const tj = (id: string, pid: string): SnapshotItem => ({ id, nm: "tracker.json", tp: "FILE", pid });
+  it("old projects: uses _ArstenDocs and its tracker", () => {
+    expect(findToolFolder([f("O", "_ArstenDocs"), tj("T", "O")])).toMatchObject({ folder: { id: "O" }, file: { id: "T" } });
+  });
+  it("prefers _AM_Docs", () => {
+    expect(findToolFolder([f("O", "_ArstenDocs"), tj("T1", "O"), f("N", "_AM_Docs"), tj("T2", "N")]).file?.id).toBe("T2");
+    expect(findToolFolder([f("O", "_ArstenDocs"), f("N", "_AM_Docs")]).folder?.id).toBe("N");
+  });
+  it("an empty _AM_Docs made by another tool does not hide the tracker in _ArstenDocs", () => {
+    expect(findToolFolder([f("N", "_AM_Docs"), f("P", "Photos", "N"), f("O", "_ArstenDocs"), tj("T", "O")])).toMatchObject({ folder: { id: "O" }, file: { id: "T" } });
+  });
+  it("both names are left out of the register", () => {
+    const r = buildRegister([f("O", "_ArstenDocs"), { id: "Z", nm: "x.pdf", tp: "FILE", pid: "O" }, f("N", "_AM_Docs"), { id: "Y", nm: "y.pdf", tp: "FILE", pid: "N" }], emptyTracker(), new Map());
+    expect(r.docs).toEqual([]);
   });
 });

@@ -1,8 +1,8 @@
 import { ApiError, type ConnectApi } from "./api";
-import { emptyTracker, normalizeTracker, TRACKER_FILE, TRACKER_FOLDER, type Tracker } from "./model";
+import { emptyTracker, findToolFolder, normalizeTracker, TRACKER_FILE, TRACKER_FOLDER, type Tracker } from "./model";
 
 /**
- * tracker.json lives in <project root>/_ArstenDocs/. Every save uploads a new Connect version of the file,
+ * tracker.json lives in <project root>/_AM_Docs/ (older projects: _ArstenDocs/, still read; only _AM_Docs is created). Every save uploads a new Connect version of the file,
  * guarded by If-Match = the version we read. On a conflict (someone saved in between) we re-read,
  * re-apply the same change and try again — changes are small and additive, so this is safe.
  */
@@ -28,15 +28,15 @@ export class TrackerStore {
     return this.tracker;
   }
 
-  private async ensureFolder(): Promise<string> {
+  /** The tool folder (_AM_Docs, or an existing _ArstenDocs that holds the tracker); created as _AM_Docs if missing. */
+  async ensureFolder(): Promise<string> {
     if (this.folderId) return this.folderId;
     const root = await this.api.rootFolderId();
     try {
       this.folderId = await this.api.createFolder(TRACKER_FOLDER, root);
     } catch (e) {
       // created by someone else in the meantime: find it
-      const items = await this.api.snapshot();
-      const f = items.find((i) => i.tp === "FOLDER" && i.nm === TRACKER_FOLDER && !i.del);
+      const f = findToolFolder(await this.api.snapshot()).folder;
       if (!f) throw e;
       this.folderId = f.id;
     }
@@ -44,9 +44,7 @@ export class TrackerStore {
   }
 
   private async refreshFromServer() {
-    const items = await this.api.snapshot();
-    const folder = items.find((i) => i.tp === "FOLDER" && i.nm === TRACKER_FOLDER && !i.del);
-    const file = folder ? items.find((i) => i.tp === "FILE" && i.nm === TRACKER_FILE && i.pid === folder.id && !i.del) : undefined;
+    const { folder, file } = findToolFolder(await this.api.snapshot());
     await this.load(folder?.id, file?.id);
   }
 

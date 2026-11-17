@@ -3,7 +3,7 @@ import { connectHost, type Host } from "./host";
 import { TrackerStore } from "./store";
 import {
   addAck, buildRegister, canIssue, emptyTracker, isOverdue, mostCommonProject, nextTransmittalId, revId, setMeta, setStatus, addTransmittal,
-  statusForPurpose, addDays, nextPackageId, ALL_STATUSES, KINDS, STATUS_BY_KIND, DEFAULT_SITE_FOLDER, DEFAULT_STATUS as DEFAULT_FOR,
+  statusForPurpose, addDays, nextPackageId, ALL_STATUSES, KINDS, STATUS_BY_KIND, DEFAULT_SITE_FOLDER, TOOL_FOLDERS, TRACKER_FOLDER, DEFAULT_STATUS as DEFAULT_FOR,
   type DocRow, type DocStatus, type Kind, type SiteCopy, type Register, type SnapshotItem, type Transmittal, type TransmittalPurpose, type UserRef, type Rfi, type DocMeta,
 } from "./model";
 import { compilePattern, DEFAULT_PATTERN, DISCIPLINES, parseName } from "./naming";
@@ -497,7 +497,7 @@ class App {
       const parts: string[] = [];
       let cur: SnapshotItem | undefined = f;
       let skip = false;
-      while (cur) { if (cur.nm === "_ArstenDocs") skip = true; parts.unshift(cur.nm); cur = cur.pid ? this.reg.folders.get(cur.pid) : undefined; }
+      while (cur) { if (TOOL_FOLDERS.includes(cur.nm)) skip = true; parts.unshift(cur.nm); cur = cur.pid ? this.reg.folders.get(cur.pid) : undefined; }
       if (!skip) out.push({ id, path: parts.join(" / ") });
     }
     return out.sort((a, b) => a.path.localeCompare(b.path));
@@ -866,7 +866,7 @@ class App {
     });
   }
 
-  /** Builds the transmittal PDF, uploads it to _ArstenDocs/Transmittals/ and stores its file id. */
+  /** Builds the transmittal PDF, uploads it to <tool folder>/Transmittals/ (_AM_Docs, or an existing _ArstenDocs) and stores its file id. */
   async attachPdf(tr: Transmittal) {
     const { transmittalPdf } = await import("./pdf");
     const bytes = await transmittalPdf(tr, this.host.projectName);
@@ -874,7 +874,7 @@ class App {
     try {
       const items = await this.host.api.snapshot();
       this.items = items;
-      const parent = this.store.folderId ?? (await this.host.api.rootFolderId());
+      const parent = await this.store.ensureFolder();
       let folder = items.find((i) => i.tp === "FOLDER" && i.nm === "Transmittals" && i.pid === parent && !i.del)?.id;
       if (!folder) folder = await this.host.api.createFolder("Transmittals", parent);
       const up = await this.host.api.upload(folder, `${tr.id}.pdf`, blob);
@@ -1016,7 +1016,7 @@ class App {
         h("label", null, t("testName")), h("div", null, h("input", { value: testName, style: "width:100%", oninput: (e: Event) => { testName = (e.target as HTMLInputElement).value; runTest(); } }), testOut),
         h("label", null, t("projectCode")), inp("projectCode", { placeholder: this.projectCode() }),
         h("label", null, t("trackerFile")), h("div", { class: "soft" }, this.store.fileId
-          ? h("span", null, `_ArstenDocs/tracker.json · ${this.store.versionId ?? ""} `, h("button", { class: "link", onclick: () => this.openFile(this.store.fileId!) }, t("download")))
+          ? h("span", null, `${this.items.find((i) => i.id === this.store.folderId)?.nm ?? TRACKER_FOLDER}/tracker.json · ${this.store.versionId ?? ""} `, h("button", { class: "link", onclick: () => this.openFile(this.store.fileId!) }, t("download")))
           : t("notCreated"))),
       editable ? h("div", { class: "actions" }, h("button", { class: "primary", onclick: async () => {
         try { compilePattern(v.pattern); } catch { alert("Invalid pattern"); return; }

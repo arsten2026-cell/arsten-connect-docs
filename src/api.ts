@@ -9,6 +9,7 @@ export interface RegionInfo {
   "connect-api"?: string; // https://eu.api.trimble.com/connect
   "issues-api"?: string; // https://app21.connect.trimble.com/v1/
   "pset-api"?: string;
+  "topic-api"?: string; // BCF API, https://open21.connect.trimble.com/
 }
 
 const REGIONS_URL = "https://app.connect.trimble.com/tc/api/2.0/regions";
@@ -19,6 +20,7 @@ const EU_FALLBACK: RegionInfo = {
   "tc-api": "https://app21.connect.trimble.com/tc/api/2.0/",
   "connect-api": "https://eu.api.trimble.com/connect",
   "issues-api": "https://app21.connect.trimble.com/v1/",
+  "topic-api": "https://open21.connect.trimble.com/",
 };
 
 export class ApiError extends Error {
@@ -67,6 +69,8 @@ export interface ConnectApi {
   createTodo(t: NativeTodoInput): Promise<NativeTodo>;
   updateTodo(id: string, t: Partial<NativeTodoInput>): Promise<NativeTodo>;
   probe(): Promise<ProbeResult[]>;
+  /** BCF test: create a topic, comment, viewpoint, read back, close. Returns one line per step. */
+  bcfTest?(): Promise<ProbeResult[]>;
   versions(fileId: string): Promise<FileVersion[]>;
   groups(): Promise<GroupRef[]>;
   groupMembers(groupId: string): Promise<string[]>;
@@ -309,6 +313,48 @@ export class RestConnectApi implements ConnectApi {
     return this.json(`${this.legacyBase}/todos/${id}`, { method: "PATCH", body: JSON.stringify(t) });
   }
 
+  get bcfBase() { return trim(this.region["topic-api"] ?? "https://open21.connect.trimble.com/") + "/bcf"; }
+
+  async bcfTest(): Promise<ProbeResult[]> {
+    const base = `${this.bcfBase}/2.1/projects/${encodeURIComponent(this.projectId)}`;
+    const out: ProbeResult[] = [];
+    const step = async <T>(name: string, url: string, init?: RequestInit): Promise<T | undefined> => {
+      const t0 = performance.now();
+      try {
+        const v = await this.json<T>(url, init);
+        out.push({ name, url, ok: true, status: JSON.stringify(v ?? "").slice(0, 160), ms: Math.round(performance.now() - t0) });
+        return v;
+      } catch (e: any) {
+        out.push({ name, url, ok: false, status: e instanceof ApiError ? `${e.status} ${e.body.slice(0, 160)}` : `blocked (${e?.message ?? e})`, ms: Math.round(performance.now() - t0) });
+        return undefined;
+      }
+    };
+    const ext = await step<any>("extensions", `${base}/extensions`);
+    const types: string[] = ext?.topic_type ?? [];
+    const statuses: string[] = ext?.topic_status ?? [];
+    const type = types.find((t) => /request|rfi|question|въпрос/i.test(t)) ?? types[0];
+    const topic: any = {
+      title: "ТЕСТ: BCF проба от Документи (може да се изтрие)",
+      description: "Автоматична проба: създаване, коментар, изглед, затваряне. RFI-TEST-000.",
+      labels: ["RFI"],
+      ...(type ? { topic_type: type } : {}),
+      ...(statuses[0] ? { topic_status: statuses[0] } : {}),
+    };
+    const created = await step<any>("create topic", `${base}/topics`, { method: "POST", body: JSON.stringify(topic) });
+    if (!created?.guid) return out;
+    const tUrl = `${base}/topics/${created.guid}`;
+    await step("comment", `${tUrl}/comments`, { method: "POST", body: JSON.stringify({ comment: "Проба: отговор на въпроса." }) });
+    await step("viewpoint", `${tUrl}/viewpoints`, { method: "POST", body: JSON.stringify({
+      perspective_camera: { camera_view_point: { x: 10, y: -10, z: 10 }, camera_direction: { x: -1, y: 1, z: -1 }, camera_up_vector: { x: 0, y: 0, z: 1 }, field_of_view: 60 },
+    }) });
+    await step("read topic", tUrl);
+    await step("read comments", `${tUrl}/comments`);
+    const closed = statuses.find((s) => /closed|done|resolved|затвор/i.test(s));
+    if (closed) await step(`close (${closed})`, tUrl, { method: "PUT", body: JSON.stringify({ ...topic, topic_status: closed }) });
+    out.push({ name: "topic guid", url: tUrl, ok: true, status: `${created.guid} · types: ${types.join(", ")} · statuses: ${statuses.join(", ")}`, ms: 0 });
+    return out;
+  }
+
   /** Diagnostics: one call per API family, reports status without throwing. */
   async probe(): Promise<ProbeResult[]> {
     const pid = encodeURIComponent(this.projectId);
@@ -324,6 +370,11 @@ export class RestConnectApi implements ConnectApi {
       ["Legacy 2.0 · Releases", `${this.legacyBase}/releases?projectId=${pid}`, { headers: { Range: "items=0-4" } }],
       ["Legacy 2.0 · change cursor", `${this.legacyBase}/projects/${pid}/status`],
       ["Issues API v1 · issues", `${issues}/context/${encodeURIComponent(trn)}/issues?pageSize=5`],
+      ["BCF · versions", `${this.bcfBase}/versions`],
+      ["BCF 2.1 · project", `${this.bcfBase}/2.1/projects/${pid}`],
+      ["BCF 2.1 · extensions", `${this.bcfBase}/2.1/projects/${pid}/extensions`],
+      ["BCF 2.1 · topics", `${this.bcfBase}/2.1/projects/${pid}/topics?$top=5`],
+      ["BCF 3.0 · topics", `${this.bcfBase}/3.0/projects/${pid}/topics?$top=5`],
     ];
     const out: ProbeResult[] = [];
     for (const [name, url, init] of checks) {

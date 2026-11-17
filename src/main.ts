@@ -1203,7 +1203,14 @@ class App {
           const res = await this.host.api.probe();
           clear(diag, h("table", null, h("tbody", null, res.map((r) => h("tr", null,
             h("td", null, r.ok ? "✓" : "✗"), h("td", null, r.name), h("td", { class: r.ok ? "soft" : "overdue" }, r.status), h("td", { class: "date" }, `${r.ms} ms`))))));
-        } }, t("runDiagnostics")), diag));
+        } }, t("runDiagnostics")),
+        this.host.api.bcfTest && this.canEdit ? h("button", { style: "margin-left:8px", onclick: async () => {
+          if (!confirm("BCF проба: ще създам тестова тема в проекта, ще добавя коментар и изглед и ще я затворя. Продължаване?")) return;
+          clear(diag, h("div", { class: "muted" }, t("loading")));
+          const res = await this.host.api.bcfTest!();
+          clear(diag, h("table", null, h("tbody", null, res.map((r) => h("tr", null,
+            h("td", null, r.ok ? "✓" : "✗"), h("td", null, r.name), h("td", { class: r.ok ? "soft mono" : "overdue", style: "font-size:11px;word-break:break-all" }, r.status), h("td", { class: "date" }, `${r.ms} ms`))))));
+        } }, "BCF проба") : "", diag));
   }
 }
 

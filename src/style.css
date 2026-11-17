@@ -213,3 +213,25 @@ body.in-shell input.big { font-size: 15px; }
   .form { grid-template-columns: 1fr; }
   .hide-sm { display: none; }
 }
+
+/* expected list, go-live check, test data */
+.tablewrap.scroll { max-height: 360px; overflow-y: auto; }
+.exp { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; }
+.exp::before { content: ""; width: 8px; height: 8px; border: 1px solid var(--ink-faint); display: inline-block; }
+.exp-late { color: var(--warn); font-weight: 500; }
+.exp.exp-late::before { background: var(--warn); border-color: var(--warn); }
+.exp.exp-received::before { border-color: var(--accent); background: linear-gradient(135deg, var(--accent) 50%, transparent 50%); }
+.exp-onsite { color: var(--ok); }
+.exp.exp-onsite::before { background: var(--ok); border-color: var(--ok); }
+.chip.exp-late:not(.on) { color: var(--warn); }
+ul.checks { list-style: none; padding: 0; margin: 10px 0 0; }
+ul.checks li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.ckmark { display: inline-block; width: 18px; text-align: center; font-weight: 700; }
+.ck-ok .ckmark { color: var(--ok); }
+.ck-warn .ckmark { color: var(--accent); }
+.ck-error .ckmark, .ck-error { color: var(--warn); }
+.ck-info .ckmark { color: var(--info); }
+ul.checks .muted { margin-left: 22px; }
+label.check { cursor: pointer; }
+button.danger { border-color: var(--warn); color: var(--warn); }
+button.danger:hover { background: var(--warn); color: #fff; }

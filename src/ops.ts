@@ -92,6 +92,7 @@ export interface IssueOptions {
   note?: string;
   date?: string;
   ack?: boolean; // create the acknowledgement ToDo (when an assignee is configured)
+  baseline?: boolean; // starting set
 }
 
 export interface IssueResult { tr: Transmittal; warnings: string[]; copies: number; todoId?: string }
@@ -115,7 +116,7 @@ export async function issueForConstruction(ctx: OpsContext, docs: DocRow[], opt:
   await store.save((t) => {
     tr = {
       id: nextTransmittalId(t, ctx.projectCode()), date: opt.date || today(), to: opt.to.trim() || "Обект / Site", attn: opt.attn?.trim() || undefined,
-      purpose, note: opt.note?.trim() || undefined, by: actor.name, byId: actor.id, createdAt: now,
+      purpose, note: opt.note?.trim() || undefined, ...(opt.baseline ? { baseline: true } : {}), by: actor.name, byId: actor.id, createdAt: now,
       items: docs.map((d) => ({ key: d.key, ...(d.source === "file" ? { label: d.label } : {}), rev: d.current.revLabel, name: d.current.name, title: d.title || undefined, fileId: d.current.fileId, versionId: d.current.versionId })),
     };
     return addTransmittal(t, tr, statusOf, actor, purpose !== "For construction");

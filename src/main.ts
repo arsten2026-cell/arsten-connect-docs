@@ -2,7 +2,7 @@ import "./style.css";
 import { connectHost, type Host } from "./host";
 import { TrackerStore } from "./store";
 import {
-  addAck, buildRegister, canIssue, emptyTracker, isOverdue, mostCommonProject, nextTransmittalId, revId, setMeta, setStatus, addTransmittal,
+  addAck, buildRegister, canIssue, emptyTracker, folderPathOf, isOverdue, mostCommonProject, nextTransmittalId, revId, setMeta, setStatus, addTransmittal,
   statusForPurpose, addDays, nextPackageId, ALL_STATUSES, KINDS, STATUS_BY_KIND, DEFAULT_SITE_FOLDER, TOOL_FOLDERS, TRACKER_FOLDER, DEFAULT_STATUS as DEFAULT_FOR,
   type DocRow, type DocStatus, type Kind, type SiteCopy, type Register, type SnapshotItem, type Transmittal, type TransmittalPurpose, type UserRef, type Rfi, type DocMeta,
 } from "./model";
@@ -11,6 +11,8 @@ import { getLang, initLang, setLang, t } from "./i18n";
 import { clear, downloadBlob, fmtDate, h, today } from "./dom";
 import type { GroupRef } from "./api";
 import { loadAccess, can, type Access } from "./roles";
+import { matchExpected, mergeExpected, parseExpected, type ExpState, type ParseResult } from "./expected";
+import { findTestData, goLiveChecks, removeTestData, type Check } from "./golive";
 import {
   issueForConstruction, createRfi, ensureRfiTodo, answerRfi, closeRfi, decideSubmittal, withdrawFromSite, ackTodoStates, folderUrl, sitePath,
   type OpsContext, type IssueResult,
@@ -57,7 +59,12 @@ class App {
   sel = new Set<string>();
   openKey = "";
   // dialogs
-  issue: { keys: string[]; to: string; attn: string; note: string; date: string; result?: IssueResult } | null = null;
+  issue: { keys: string[]; to: string; attn: string; note: string; date: string; baseline?: boolean; ack: boolean; result?: IssueResult } | null = null;
+  expView = false;
+  expFilter: ExpState | "" = "";
+  expImport: { text: string; parsed?: ParseResult } | null = null;
+  checks: Check[] | null = null;
+  cleanSel: { keys: Set<string>; tr: Set<string>; rfi: Set<string> } | null = null;
   trForm: { to: string; attn: string; purpose: TransmittalPurpose; date: string; note: string; keys: Set<string>; filter: string } | null = null;
   rfiForm: { title: string; question: string; docs: Set<string>; location: string; due: string; assignee: string; filter: string } | null = null;
   upload: { folderId: string; newFolder: string; files: File[]; from: string; kind: Kind; done?: string[] } | null = null;
@@ -353,11 +360,15 @@ class App {
     if (this.issue) { body.append(this.issuePanel()); return; }
     if (this.upload) { body.append(this.uploadPanel()); return; }
     const all = this.reg.docs;
+    const exp = this.expectedRows();
+    const expOpen = exp.rows.filter((r) => r.state === "missing" || r.state === "late").length;
     // category chips
     body.append(h("div", { class: "chips" }, KINDS.map((k) => {
       const n = all.filter((d) => d.kind === k).length;
-      return h("button", { class: "chip" + (this.kind === k ? " on" : ""), onclick: () => { this.kind = k; this.status = ""; this.sel.clear(); this.render(); } }, `${t("kind_" + k)} · ${n}`);
-    })));
+      return h("button", { class: "chip" + (!this.expView && this.kind === k ? " on" : ""), onclick: () => { this.kind = k; this.expView = false; this.status = ""; this.sel.clear(); this.render(); } }, `${t("kind_" + k)} · ${n}`);
+    }), h("button", { class: "chip" + (this.expView ? " on" : ""), onclick: () => { this.expView = true; this.sel.clear(); this.render(); } },
+      `${t("expected")}`, exp.rows.length ? ` · ${expOpen ? expOpen + " " + t("exp_missing").toLowerCase() : "✓"}` : "")));
+    if (this.expView) { this.viewExpected(body, exp); return; }
     const ofKind = all.filter((d) => d.kind === this.kind);
     body.append(h("div", { class: "chips small" },
       h("button", { class: "chip" + (!this.status ? " on" : ""), onclick: () => { this.status = ""; this.render(); } }, `${t("all")} · ${ofKind.length}`),
@@ -377,6 +388,8 @@ class App {
         parts.map((p) => h("option", { value: p, selected: this.part === p }, p))) : "",
       h("span", { class: "grow" }),
       this.canEdit ? h("button", { onclick: () => { this.upload = { folderId: "", newFolder: "", files: [], from: "", kind: this.kind }; this.render(); } }, "⇪ " + t("uploadReceived")) : "",
+      this.canEdit && this.kind === "design" && !this.store.tracker.transmittals.some((x) => x.purpose === "For construction" && !/НЕУСПЕШНО/.test(x.note ?? ""))
+        ? h("button", { title: t("baselineHelp"), onclick: () => this.startBaseline() }, t("baseline")) : "",
       h("button", { onclick: () => this.exportCsv() }, t("exportCsv"))));
     body.append(actions, tableBox);
 
@@ -568,7 +581,18 @@ class App {
   startIssue(keys: string[]) {
     const docs = keys.map((k) => this.doc(k)).filter((d): d is DocRow => !!d && this.issuable(d));
     if (!docs.length) return;
-    this.issue = { keys: docs.map((d) => d.key), to: "Обект / Site", attn: "", note: "", date: today() };
+    this.issue = { keys: docs.map((d) => d.key), to: "Обект / Site", attn: "", note: "", date: today(), ack: true };
+    this.tab = "register";
+    this.openKey = "";
+    this.render();
+  }
+
+  /** Starting set: every design document whose current revision can be issued (not yet on site). */
+  startBaseline() {
+    const docs = this.reg.docs.filter((d) => d.kind === "design" && this.issuable(d) && !this.store.tracker.site[d.key]);
+    if (!docs.length) { this.toast(t("baselineNone")); return; }
+    this.issue = { keys: docs.map((d) => d.key), to: "Обект / Site", attn: "", note: `${t("baselineNote")} ${bgDate(today())}`, date: today(), baseline: true, ack: true };
+    this.expView = false;
     this.tab = "register";
     this.openKey = "";
     this.render();
@@ -593,11 +617,13 @@ class App {
           h("button", { onclick: () => { this.issue = null; this.sel.clear(); this.render(); } }, t("close"))));
     }
     return h("div", { class: "panel issue" },
-      h("h2", null, t("issueTitle"), h("span", { class: "mono muted", style: "font-size:13px;margin-left:10px" }, nextTransmittalId(this.store.tracker, this.projectCode()))),
-      h("div", { class: "tablewrap" }, h("table", null, h("tbody", null, docs.map((d) => {
+      h("h2", null, s.baseline ? t("baseline") : t("issueTitle"), h("span", { class: "mono muted", style: "font-size:13px;margin-left:10px" }, nextTransmittalId(this.store.tracker, this.projectCode()))),
+      s.baseline ? h("p", { class: "soft" }, t("baselineHelp")) : "",
+      h("div", { class: "tablewrap" + (docs.length > 12 ? " scroll" : "") }, h("table", null, h("tbody", null, docs.map((d) => {
         const prev = this.store.tracker.site[d.key];
         return h("tr", null, h("td", { class: "key" }, d.label), h("td", { class: "num" }, h("span", { class: "revbig" }, d.current.revLabel)),
-          h("td", { class: "hide-sm" }, d.title || d.current.name), h("td", { class: "muted" }, prev ? `${t("st_superseded").toLowerCase()}: ${prev.rev}` : ""));
+          h("td", { class: "hide-sm" }, d.title || d.current.name), h("td", { class: "muted" }, prev ? `${t("st_superseded").toLowerCase()}: ${prev.rev}` : ""),
+          docs.length > 1 ? h("td", null, h("button", { class: "link", title: t("removeRow"), onclick: () => { s.keys = s.keys.filter((k) => k !== d.key); this.render(); } }, "×")) : "");
       })))),
       h("div", { class: "explain" }, h("b", null, t("issueWhat")), h("ol", null,
         h("li", null, t("issueStep1")),
@@ -609,9 +635,10 @@ class App {
         h("datalist", { id: "recips" }, [...new Set(this.store.tracker.transmittals.map((x) => x.to))].map((r) => h("option", { value: r }))),
         h("label", null, t("attn")), h("input", { value: s.attn, oninput: set("attn") }),
         h("label", null, t("date")), h("input", { type: "date", value: s.date, oninput: set("date") }),
-        h("label", null, t("note")), h("textarea", { rows: 2, oninput: set("note") }, s.note)),
+        h("label", null, t("note")), h("textarea", { rows: 2, oninput: set("note") }, s.note),
+        ack ? h("label", null, "") : "", ack ? h("label", { class: "check" }, h("input", { type: "checkbox", checked: s.ack, onchange: (e: Event) => { s.ack = (e.target as HTMLInputElement).checked; } }), ` ${t("ackCreate")} → ${ack.name}`) : ""),
       h("div", { class: "actions" },
-        h("button", { class: "primary", disabled: !!this.busy, onclick: () => this.doIssue() }, `▶ ${t("issue")} (${docs.length})`),
+        h("button", { class: "primary", disabled: !!this.busy || !docs.length, onclick: () => this.doIssue() }, `▶ ${t("issue")} (${docs.length})`),
         h("button", { onclick: () => { this.issue = null; this.render(); } }, t("cancel"))));
   }
 
@@ -619,7 +646,7 @@ class App {
     const s = this.issue!;
     const docs = s.keys.map((k) => this.doc(k)).filter(Boolean) as DocRow[];
     await this.run(t("saving"), async () => {
-      const r = await issueForConstruction(this.ctx, docs, { to: s.to, attn: s.attn, note: s.note, date: s.date }, this.statusOf);
+      const r = await issueForConstruction(this.ctx, docs, { to: s.to, attn: s.attn, note: s.note, date: s.date, baseline: s.baseline, ack: s.ack }, this.statusOf);
       this.busy = "PDF…"; this.renderBusy();
       await this.attachPdf(r.tr);
       await this.reloadFiles();
@@ -793,7 +820,7 @@ class App {
         const todo = x.todoId ? this.todoStates.get(x.todoId) : undefined;
         const appAcks = x.items.reduce((n, i) => n + this.acksOf(i.key, i.rev).length, 0);
         return h("tr", null,
-          h("td", { class: "key" }, x.id),
+          h("td", { class: "key" }, x.id, x.baseline ? h("div", null, h("span", { class: "tag" }, t("baseline").toLowerCase())) : ""),
           h("td", { class: "date" }, fmtDate(x.date)),
           h("td", null, x.to, x.attn ? h("div", { class: "muted" }, x.attn) : "", h("div", { class: "muted" }, x.by)),
           h("td", null, h("span", { class: `st s-${slug(statusForPurpose(x.purpose))}` }, t("pu_" + x.purpose))),
@@ -986,6 +1013,145 @@ class App {
   }
 
   // ---------------- Настройки
+  // ---------------- expected drawing list
+  expectedRows() {
+    return matchExpected(this.store.tracker.expected ?? [], this.reg.docs, (d) => !!this.store.tracker.site[d.key] || d.status === "construction", today());
+  }
+
+  viewExpected(body: HTMLElement, exp: ReturnType<App["expectedRows"]>) {
+    if (this.expImport) { body.append(this.expImportPanel()); return; }
+    const states: ExpState[] = ["late", "missing", "received", "onsite"];
+    body.append(h("p", { class: "soft" }, t("expHelp")));
+    body.append(h("div", { class: "toolbar" },
+      h("div", { class: "chips small" },
+        h("button", { class: "chip" + (!this.expFilter ? " on" : ""), onclick: () => { this.expFilter = ""; this.render(); } }, `${t("all")} · ${exp.rows.length}`),
+        states.map((st) => {
+          const n = exp.rows.filter((r) => r.state === st).length;
+          return n ? h("button", { class: `chip exp-${st}` + (this.expFilter === st ? " on" : ""), onclick: () => { this.expFilter = this.expFilter === st ? "" : st; this.render(); } }, `${t("exp_" + st)} · ${n}`) : "";
+        })),
+      h("span", { class: "grow" }),
+      this.canEdit ? h("button", { onclick: () => { this.expImport = { text: "" }; this.render(); } }, "⇪ " + t("expImport")) : "",
+      this.canEdit && exp.rows.length ? h("button", { class: "link", onclick: () => {
+        if (!confirm(t("expClearConfirm"))) return;
+        this.run(t("saving"), async () => { await this.store.save((x) => ({ ...x, expected: [] })); });
+      } }, t("expClear")) : ""));
+    if (!exp.rows.length) { body.append(h("div", { class: "empty" }, t("expEmpty"))); return; }
+    const list = exp.rows.filter((r) => !this.expFilter || r.state === this.expFilter);
+    body.append(h("div", { class: "tablewrap" }, h("table", null,
+      h("thead", null, h("tr", null, h("th", null, t("number")), h("th", { class: "hide-sm" }, t("title")), h("th", null, t("part")), h("th", null, t("planned")), h("th", null, t("status")), h("th", null, t("rev")))),
+      h("tbody", null, list.map((r) => h("tr", { class: r.doc ? "row" : "", onclick: () => { if (r.doc) this.openDoc(r.doc.key); } },
+        h("td", { class: "key" }, r.e.number),
+        h("td", { class: "title hide-sm" }, r.e.title ?? r.doc?.title ?? "", r.e.note ? h("div", { class: "muted" }, r.e.note) : ""),
+        h("td", null, r.e.part ?? ""),
+        h("td", { class: "date" + (r.state === "late" ? " overdue" : "") }, bgDate(r.e.planned)),
+        h("td", null, h("span", { class: `exp exp-${r.state}` }, t("exp_" + r.state))),
+        h("td", { class: "num" }, r.doc ? r.doc.current.revLabel : "")))))));
+    if (exp.extra.length)
+      body.append(h("details", { class: "unnum" }, h("summary", null, `${t("expExtra")} (${exp.extra.length})`),
+        h("div", { class: "tablewrap" }, h("table", null, h("tbody", null, exp.extra.map((d) => h("tr", { class: "row", onclick: () => this.openDoc(d.key) },
+          h("td", { class: "key" }, d.label), h("td", { class: "num" }, d.current.revLabel), h("td", { class: "soft hide-sm" }, d.title))))))));
+  }
+
+  expImportPanel() {
+    const s = this.expImport!;
+    const preview = h("div");
+    const show = () => {
+      s.parsed = s.text.trim() ? parseExpected(s.text) : undefined;
+      const p = s.parsed;
+      clear(preview, p ? h("div", null,
+        h("p", null, h("b", null, `${t("expPreview")}: ${p.rows.length}`), p.skipped ? h("span", { class: "muted" }, ` · ${p.skipped} ${t("expSkipped")}`) : ""),
+        h("div", { class: "tablewrap scroll" }, h("table", null, h("tbody", null, p.rows.slice(0, 200).map((e) => h("tr", null,
+          h("td", { class: "key" }, e.number), h("td", null, e.title ?? ""), h("td", null, e.part ?? ""), h("td", { class: "date" }, bgDate(e.planned)))))))) : "");
+    };
+    const ta = h("textarea", { rows: 8, style: "width:100%", class: "mono", placeholder: "Номер\tНаименование\tЧаст\tСрок", oninput: (e: Event) => { s.text = (e.target as HTMLTextAreaElement).value; show(); } }, s.text);
+    const file = h("input", { type: "file", accept: ".csv,.txt,.tsv", onchange: async (e: Event) => {
+      const f = (e.target as HTMLInputElement).files?.[0];
+      if (!f) return;
+      s.text = await f.text();
+      (ta as HTMLTextAreaElement).value = s.text;
+      show();
+    } });
+    show();
+    return h("div", { class: "panel" },
+      h("h2", null, t("expImport")),
+      h("p", { class: "soft" }, t("expPasteHelp")),
+      ta, h("div", { style: "margin:6px 0" }, file),
+      preview,
+      h("div", { class: "actions" },
+        h("button", { class: "primary", onclick: () => {
+          const rows = s.parsed?.rows ?? [];
+          if (!rows.length) return;
+          this.run(t("saving"), async () => {
+            await this.store.save((x) => ({ ...x, expected: mergeExpected(x.expected ?? [], rows) }));
+            this.expImport = null;
+            this.toast(`${t("saved")} (${rows.length})`);
+          });
+        } }, t("save")),
+        h("button", { onclick: () => { this.expImport = null; this.render(); } }, t("cancel"))));
+  }
+
+  // ---------------- go-live check, test data
+  goLivePanel() {
+    const box = h("div");
+    const draw = () => clear(box, this.checks ? h("ul", { class: "checks" }, this.checks.map((c) => h("li", { class: `ck ck-${c.level}` },
+      h("span", { class: "ckmark" }, { ok: "✓", warn: "!", error: "✗", info: "i" }[c.level]), " ", c.text, c.hint ? h("div", { class: "muted" }, c.hint) : ""))) : "");
+    draw();
+    return h("div", { class: "panel" },
+      h("h2", null, t("goLive")),
+      h("button", { onclick: async () => {
+        const groups = this.groups.length ? this.groups : await this.host.api.groups().catch(() => [] as GroupRef[]);
+        const site = sitePath(this.store.tracker.settings.siteFolder).join(" / ");
+        this.checks = goLiveChecks({
+          tracker: this.store.tracker, reg: this.reg, items: this.items, trackerExists: !!this.store.fileId, canEdit: this.canEdit,
+          groupIds: new Set(groups.map((g) => g.id)), userIds: new Set(this.users.map((u) => u.id)), projectCode: this.projectCode(),
+          siteFolderExists: [...this.reg.folders.keys()].some((id) => folderPathOf(id, this.reg.folders) === site),
+        });
+        const test = findTestData(this.store.tracker, this.reg);
+        if (test.keys.size + test.transmittals.length + test.rfis.length)
+          this.checks.push({ level: "warn", text: `${t("testData")}: ${test.keys.size} ${t("testDocs").toLowerCase()}, ${test.transmittals.length} ${t("transmittals").toLowerCase()}, ${test.rfis.length} RFI.`, hint: "↓ " + t("testRemove") });
+        draw();
+      } }, t("goLiveRun")), box);
+  }
+
+  testDataPanel() {
+    const test = findTestData(this.store.tracker, this.reg);
+    if (!test.keys.size && !test.transmittals.length && !test.rfis.length)
+      return h("div", { class: "panel" }, h("h2", null, t("testData")), h("div", { class: "muted" }, t("testNone")));
+    if (!this.cleanSel) this.cleanSel = { keys: new Set(test.keys), tr: new Set(test.transmittals.map((x) => x.id)), rfi: new Set(test.rfis.map((x) => x.id)) };
+    const sel = this.cleanSel;
+    const cb = (set: Set<string>, id: string, label: string) => h("label", { class: "check", style: "display:block" },
+      h("input", { type: "checkbox", checked: set.has(id), onchange: (e: Event) => { (e.target as HTMLInputElement).checked ? set.add(id) : set.delete(id); } }), " ", label);
+    return h("div", { class: "panel" },
+      h("h2", null, t("testData")),
+      h("p", { class: "soft" }, t("testDataHelp")),
+      test.transmittals.length ? h("div", null, h("b", null, t("transmittals")), test.transmittals.map((x) => cb(sel.tr, x.id, `${x.id} · ${bgDate(x.date)} · ${x.items.map((i) => i.label ?? this.labelOf(i.key)).join(", ")}`))) : "",
+      test.rfis.length ? h("div", null, h("b", null, "RFI"), test.rfis.map((r) => cb(sel.rfi, r.id, `${r.id} · ${r.title}`))) : "",
+      test.keys.size ? h("div", null, h("b", null, t("testDocs")), [...test.keys].map((k) => cb(sel.keys, k, this.labelOf(k)))) : "",
+      h("div", { class: "actions" }, h("button", { class: "danger", onclick: () => this.removeTest() }, t("testRemove"))));
+  }
+
+  async removeTest() {
+    const sel = this.cleanSel;
+    if (!sel || (!sel.keys.size && !sel.tr.size && !sel.rfi.size)) return;
+    if (!confirm(t("testConfirm"))) return;
+    await this.run(t("saving"), async () => {
+      const pdfs = this.store.tracker.transmittals.filter((x) => sel.tr.has(x.id) && x.pdfFileId).map((x) => x.pdfFileId!);
+      await this.store.save((x) => removeTestData(x, sel.keys, sel.tr, sel.rfi));
+      if (pdfs.length) {
+        const parent = this.items.find((i) => i.id === pdfs[0])?.pid;
+        if (parent) {
+          let sub = this.items.find((i) => i.tp === "FOLDER" && i.nm === "Тест" && i.pid === parent && !i.del)?.id;
+          try { if (!sub) sub = await this.host.api.createFolder("Тест", parent); } catch { /* keep in place */ }
+          if (sub) for (const id of pdfs) { try { await this.host.api.moveFile(id, sub); } catch { /* already moved or name exists */ } }
+        }
+      }
+      await this.reloadFiles();
+      this.cleanSel = null;
+      this.checks = null;
+      this.toast(t("testRemoved"));
+    });
+  }
+
   viewSettings(body: HTMLElement) {
     const st = this.store.tracker.settings;
     const v = {
@@ -1027,6 +1193,8 @@ class App {
           this.toast(t("saved"));
         });
       } }, t("save"))) : ""),
+      this.goLivePanel(),
+      this.canEdit ? this.testDataPanel() : "",
       h("div", { class: "panel" },
         h("h2", null, t("diagnostics")),
         h("div", { class: "soft", style: "margin-bottom:8px" }, `mode: ${this.host.api.mode} · project ${this.host.projectId} · ${this.host.user.name}`),

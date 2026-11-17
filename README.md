@@ -38,6 +38,18 @@ A document is either a file named like `1028-ST-DR-0101_R02_….pdf` (revisions 
 Site people only need the Connect mobile app: the site folder holds only current stamped drawings (mark it for offline),
 and the ToDo is their notice + acknowledgement (closing it = received). The in-app "Потвърждавам" button is the other way.
 
+### Starting a project that is already running
+- **Регистър → Начален комплект** (shown until the first issue for construction): lists the current revision of every
+  received design document. Remove with × what is not used on site, then issue: one transmittal marked "начален
+  комплект", stamped copies in the site folder, one acknowledgement ToDo (optional).
+- **Регистър → Очакван списък:** paste the designer's drawing list from Excel (Номер, Наименование, Част, Срок; any
+  column order with a header row) or load a .csv. Rows with the same number are updated. Each row shows Липсва /
+  Закъснява (past its date) / Получен / На обекта; documents not on the list are listed separately.
+- **Настройки → Проверка преди старт:** checks rights, site folder (flags a test folder), ToDo/RFI recipients (still in
+  the project, group rather than one person), project code, documents "За изпълнение" without a site copy, missing site
+  copies, test data. **Тестови данни:** lists transmittals, RFIs and documents marked TEST / ТЕСТ / ZZ_TEST; the chosen
+  ones are removed from tracker.json only (files stay; transmittal PDFs move to `Transmittals/Тест`).
+
 ### Roles (from Connect groups, same as the other Arsten / MULTIPLAN panels)
 admin (project admin / 00_ADMIN) and GC (GENERAL CONTRACTOR, EXECUTION PROJECT MANAGER): everything ·
 designers (DESIGNERS, STRUCTURAL DESIGNER): read, answer RFIs, decide shop drawings · client, subcontractors,
@@ -55,7 +67,7 @@ on conflict; every save is a Connect version (= audit trail). Shop-drawing revie
 4. Received designs (by email): Регистър → **⇪ Качи получени файлове** (or drop them into a Connect folder), check them,
    then **▶ Издай за изпълнение**.
 
-### Pilot project 1028 – test data from 16.11.2026 (remove or keep)
+### Pilot project 1028 – test data from 16.11.2026 (remove with Настройки → Тестови данни)
 - Folder `ZZ_TEST_Документи` (test drawings + its `ЗА СТРОИТЕЛСТВО` with stamped/superseded copies).
 - In tracker.json: TR-1028-001, TR-1028-002, RFI-1028-001, test acknowledgements, M-01 decision B, and the setting
   site folder = `ZZ_TEST_Документи/ЗА СТРОИТЕЛСТВО`, ToDo assignee = Nayden Kochev (change both in Настройки for real use).

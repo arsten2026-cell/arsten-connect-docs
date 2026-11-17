@@ -87,6 +87,7 @@ export interface Transmittal {
   items: TransmittalItem[];
   pdfFileId?: string;
   todoId?: string; // acknowledgement ToDo
+  baseline?: boolean; // starting set: the documents already in use on site when the project came under control
   ackTarget?: string; // who must acknowledge (group/user name)
 }
 
@@ -131,6 +132,9 @@ export interface Rfi {
   outcome?: "none" | "order" | "revision"; // без промяна / заповед в заповедната книга / нова ревизия
 }
 
+/** One row of the designer's expected drawing list. */
+export interface Expected { number: string; title?: string; part?: string; planned?: string /* YYYY-MM-DD */; note?: string; kind?: Kind }
+
 export type TodoState = "Open" | "In progress" | "Done";
 export interface LocalTodo {
   id: string; title: string; description?: string; assignee?: UserRef; due?: string; state: TodoState;
@@ -162,6 +166,7 @@ export interface Tracker {
   site: Record<string, SiteCopy>; // key -> current controlled copy in the site folder
   rfis: Rfi[];
   todos: LocalTodo[];
+  expected: Expected[];
 }
 
 export const DEFAULT_SITE_FOLDER = "ЗА СТРОИТЕЛСТВО";
@@ -169,7 +174,7 @@ export const DEFAULT_SITE_FOLDER = "ЗА СТРОИТЕЛСТВО";
 export function emptyTracker(): Tracker {
   return {
     schema: 2, settings: { pattern: DEFAULT_PATTERN, trackExts: "pdf", siteFolder: DEFAULT_SITE_FOLDER },
-    status: {}, meta: {}, log: [], transmittals: [], packages: [], acks: {}, site: {}, rfis: [], todos: [],
+    status: {}, meta: {}, log: [], transmittals: [], packages: [], acks: {}, site: {}, rfis: [], todos: [], expected: [],
   };
 }
 
@@ -188,7 +193,7 @@ export function normalizeTracker(raw: unknown): Tracker {
     settings: { ...t.settings, ...obj(r.settings) },
     status, meta: obj(r.meta), log,
     transmittals: arr(r.transmittals), packages: arr(r.packages), acks: obj(r.acks), site: obj(r.site),
-    rfis: arr(r.rfis), todos: arr(r.todos),
+    rfis: arr(r.rfis), todos: arr(r.todos), expected: arr(r.expected),
   };
 }
 
